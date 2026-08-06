@@ -1,0 +1,229 @@
+# Propensity Score Matching by T1 Covariates (PSMbyT1)
+
+## 1) Scope and inferred requirement
+
+This report was generated from the repository files:
+
+- `20260806_DeID.xlsx`
+- `20260806_copilot_dataset_guide.md`
+- `Propensity_Match.docx`
+
+The newly requested "Propensity_Match_by_T1" file was not present in the repository at execution time, so I inferred the intended task as:
+
+1. Run **propensity score matching (PSM)** as the PS-based sensitivity analysis.
+2. Use **T1 / baseline covariates** for the PS model.
+3. Evaluate the same two exposures emphasized in `Propensity_Match.docx`:
+   - `Rehab_LOS > 42` days
+   - `MNA1 < 24`
+4. Use a locomotor outcome consistent with the dataset guide and prior analysis: **`6MWT4`** (discharge 6-minute walk distance).
+
+---
+
+## 2) Data and cohort
+
+- Source sheet: `Sheet1` in `20260806_DeID.xlsx`
+- Total records: **633**
+- Program completers: **577**
+- Non-missing discharge 6MWT among completers: **511**
+
+Primary analysis cohort for PSM:
+- `PAC_Program_Completion == "Completed PAC program"`
+- `6MWT4` non-missing
+
+---
+
+## 3) Statistical methods
+
+### 3.1 Exposures
+
+- **Exposure A (LOS):** `A_los_long = 1(Rehab_LOS > 42)`
+- **Exposure B (Nutrition):** `A_low_mna = 1(MNA1 < 24)`
+
+### 3.2 Outcome
+
+- `6MWT4` (meters at discharge)
+
+### 3.3 Matching specification
+
+For each exposure separately:
+
+- Estimate PS with logistic regression.
+- Perform **1:1 nearest-neighbor matching without replacement** on logit(PS).
+- Use caliper = `0.2 * SD(logit(PS))`.
+- Estimate ATT as mean paired difference: `Y_treated - Y_control`.
+- 95% CI via paired t interval.
+
+### 3.4 T1/baseline covariates used in PS models
+
+Common baseline covariates (all from or before early rehab):
+
+`Age, Sex, AF, DM, HTN, Dyslipidemia, CAD, CKD, OldStroke, HemorrhageStroke, Pneumonia, UTI, GIB, Cellulitis, Neurology_LOS, BI1, BBS1, MRS1, FOIS1, FuglUE1, FuglSEN1, EuroQoL5D1, IADL1, CCAT1, 6MWT1_Imputed, Gait_Speed_1_Imputed, Side_Right, Side_Left, Side_Bilateral, Loc_CortSub, Loc_Subcortical, Loc_Infratentorial`
+
+For LOS exposure PS only, `MNA1` is also included as a baseline confounder.
+For MNA exposure PS, `MNA1` is excluded because it is the exposure itself.
+
+### 3.5 Balance diagnostics
+
+Reported:
+- Mean absolute SMD before vs after matching.
+- Maximum absolute SMD before vs after matching.
+
+---
+
+## 4) Reproducible analysis code
+
+```python
+import pandas as pd, numpy as np
+from sklearn.linear_model import LogisticRegression
+from scipy.stats import t
+
+path='20260806_DeID.xlsx'
+df=pd.read_excel(path)
+cohort=df[(df['PAC_Program_Completion']=='Completed PAC program') & (df['6MWT4'].notna())].copy()
+cohort['A_los_long']=(cohort['Rehab_LOS']>42).astype(int)
+cohort['A_low_mna']=(cohort['MNA1']<24).astype(int)
+
+base_covars=['Age','Sex, F0 M1','AF','DM','HTN','Dyslipidemia','CAD','CKD','OldStroke','HemorrhageStroke',
+             'Pneumonia','UTI','GIB','Cellulitis','Neurology_LOS','BI1','BBS1','MRS1','FOIS1','FuglUE1',
+             'FuglSEN1','EuroQoL5D1','IADL1','CCAT1','MNA1','6MWT1_Imputed','Gait_Speed_1_Imputed',
+             'Side_Right','Side_Left','Side_Bilateral','Loc_CortSub','Loc_Subcortical','Loc_Infratentorial']
+
+def smd(x_t,x_c):
+    mt,mc=np.mean(x_t),np.mean(x_c)
+    vt,vc=np.var(x_t,ddof=1),np.var(x_c,ddof=1)
+    denom=np.sqrt((vt+vc)/2) if (vt+vc)>0 else 1e-12
+    return (mt-mc)/denom
+
+def psm_analysis(data, A_col, covars, outcome='6MWT4', caliper_sd=0.2):
+    d=data[[A_col,outcome]+covars].dropna().copy()
+    X=d[covars].values
+    y=d[A_col].values
+    lr=LogisticRegression(max_iter=5000, C=1.0, solver='lbfgs')
+    lr.fit(X,y)
+    ps=np.clip(lr.predict_proba(X)[:,1],1e-6,1-1e-6)
+    logit=np.log(ps/(1-ps))
+
+    d['_ps']=ps
+    d['_logit']=logit
+    d['_idx']=np.arange(len(d))
+    treated=d[d[A_col]==1].copy()
+    control=d[d[A_col]==0].copy()
+
+    caliper=caliper_sd*np.std(logit,ddof=1)
+    control_pool=control.copy()
+    pairs=[]
+    # Matching order can affect greedy nearest-neighbor results.
+    # Here treated units are processed in ascending PS order for deterministic output.
+    for _,tr in treated.sort_values('_ps').iterrows():
+        if len(control_pool)==0:
+            break
+        dist=np.abs(control_pool['_logit'].values-tr['_logit'])
+        j=np.argmin(dist)
+        if dist[j] <= caliper:
+            mc=control_pool.iloc[j]
+            pairs.append((int(tr['_idx']), int(mc['_idx'])))
+            control_pool=control_pool.drop(control_pool.index[j])
+
+    t_idx=[p[0] for p in pairs]
+    c_idx=[p[1] for p in pairs]
+    t_rows=d.set_index('_idx').loc[t_idx]
+    c_rows=d.set_index('_idx').loc[c_idx]
+
+    diff=t_rows[outcome].values-c_rows[outcome].values
+    n=len(diff)
+    att=float(np.mean(diff))
+    sd=float(np.std(diff,ddof=1))
+    se=sd/np.sqrt(n)
+    tcrit=float(t.ppf(0.975,df=n-1))
+    ci=(att-tcrit*se, att+tcrit*se)
+
+    smd_before=[abs(smd(d.loc[d[A_col]==1,c],d.loc[d[A_col]==0,c])) for c in covars]
+    smd_after=[abs(smd(t_rows[c],c_rows[c])) for c in covars]
+
+    return {
+        'n_total':len(d), 'n_treated':int((d[A_col]==1).sum()), 'n_control':int((d[A_col]==0).sum()),
+        'caliper':float(caliper), 'pairs':len(pairs),
+        'matched_treated_pct':float(100*len(pairs)/max(1,(d[A_col]==1).sum())),
+        'mean_abs_smd_before':float(np.mean(smd_before)), 'mean_abs_smd_after':float(np.mean(smd_after)),
+        'max_abs_smd_before':float(np.max(smd_before)), 'max_abs_smd_after':float(np.max(smd_after)),
+        'att':att, 'ci_low':float(ci[0]), 'ci_high':float(ci[1])
+    }
+
+res_los=psm_analysis(cohort,'A_los_long',base_covars)
+res_mna=psm_analysis(cohort,'A_low_mna',[c for c in base_covars if c!='MNA1'])
+print(res_los)
+print(res_mna)
+```
+
+---
+
+## 5) Results
+
+### 5.1 Exposure A: `Rehab_LOS > 42`
+
+- Analysis N: **511**
+- Treated / control before match: **271 / 240**
+- Caliper (logit scale): **0.2131**
+- Matched pairs: **145**
+- Treated retained: **53.5%**
+
+Balance:
+- Mean |SMD| before: **0.2039**
+- Mean |SMD| after: **0.0548**
+- Max |SMD| before: **0.7371**
+- Max |SMD| after: **0.1966**
+
+Effect on discharge 6MWT4 (ATT):
+- **+55.0 meters**
+- 95% CI: **+21.8 to +88.3**
+
+Matched means:
+- Treated: **351.64 m**
+- Control: **296.60 m**
+
+### 5.2 Exposure B: `MNA1 < 24`
+
+- Analysis N: **511**
+- Treated / control before match: **473 / 38**
+- Caliper (logit scale): **0.3521**
+- Matched pairs: **37**
+- Treated retained: **7.82%**
+
+Balance:
+- Mean |SMD| before: **0.3108**
+- Mean |SMD| after: **0.1276**
+- Max |SMD| before: **0.9958**
+- Max |SMD| after: **0.3335**
+
+Effect on discharge 6MWT4 (ATT):
+- **+66.8 meters**
+- 95% CI: **+8.2 to +125.4**
+
+Matched means:
+- Treated: **416.05 m**
+- Control: **349.27 m**
+
+---
+
+## 6) Interpretation
+
+1. **LOS>42 analysis** shows substantial improvement in covariate balance after matching and a positive ATT on discharge walking distance. Under the matching assumptions, longer rehab stay is associated with better discharge 6MWT4 in matched comparable patients.
+
+2. **MNA1<24 analysis** is heavily constrained by positivity/imbalance:
+   - Very small unexposed pool (only 38 controls),
+   - Only 37 matched pairs,
+   - Low treated retention (7.8%),
+   - Residual imbalance still notable (max |SMD| ~0.33).
+   Therefore this estimate is fragile and should be treated as low-robustness.
+
+3. Causal caveat: this is observational data; LOS can reflect evolving clinical trajectory, so reverse-causation/time-related confounding is possible.
+
+---
+
+## 7) Assumptions and limitations
+
+- Conditional exchangeability given observed T1/baseline covariates.
+- Positivity (especially weak for MNA exposure).
+- Correct PS model specification.
+- No unmeasured confounding.
+- Outcome selection inferred (`6MWT4`) because explicit outcome in requested new file was unavailable in repo.
