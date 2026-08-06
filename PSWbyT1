@@ -1,0 +1,175 @@
+# PSWbyT1: Propensity-score workflow using T1-only covariates
+
+## 1) Analysis target (explicitly defined)
+Because `Propensity_Match_by_T1.docx` emphasizes that propensity covariates must be known by T1, this report defines:
+- **Exposure**: `HemorrhageStroke` (1 = hemorrhagic, 0 = ischemic), known before/at T1.
+- **Outcome**: `PAC_Program_Completion` recoded to **non-completion** (1 = did not complete, 0 = completed).
+
+## 2) T1-only covariate set used in propensity model
+Included baseline/T1 variables only:
+- Demographics: `Age`, `Sex, F0 M1`
+- Acute management/complications before rehab: `Pneumonia`, `UTI`, `GIB`, `Cellulitis`, `StrokeInEvolution`, `tPA`, `IA`, `tPAIA`, `Neurology_LOS`
+- Stroke characteristics: `Dissection`, `ACA`, `Undetermined`, `LVS`, `LVO`, `Side_Right`, `Side_Left`, `Side_Bilateral`, `Loc_CortSub`, `Loc_Subcortical`, `Loc_Infratentorial`
+- Comorbidities: all 16 listed in the specification
+- NIHSS admission sub-items (`*In`): all 15
+- Baseline functional T1 variables: `MRS1`, `BI1`, `FOIS1`, `MNA1`, `EuroQoL5D1`, `IADL1`, `BBS1`, `FuglUE1`, `FuglSEN1`, `CCAT1`, `Initial_6MWT_Distance`, `Initial_GS`
+
+Excluded as post-T1/non-baseline for PS estimation: `Rehab_LOS`, `Rehab_LOS_Category`, `PAC_Program_Completion`, discharge destination, and all T2/T3/T4 measures.
+
+## 3) Reproducible code
+```python
+import pandas as pd, numpy as np
+import os, sys
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.neighbors import NearestNeighbors
+
+path = sys.argv[1] if len(sys.argv) > 1 else os.getenv('STROKE_XLSX_PATH')
+if not path:
+    raise ValueError('Provide XLSX path via argv[1] or STROKE_XLSX_PATH')
+df=pd.read_excel(path)
+
+df['outcome_noncompletion']=(df['PAC_Program_Completion']=='Did not complete PAC program').astype(int)
+
+a='HemorrhageStroke'
+y=df['outcome_noncompletion']
+t=pd.to_numeric(df[a], errors='coerce')
+
+comorbid=['AF','DM','HTN','Dyslipidemia','CAD','CKD','RestrictiveLung','GIUlcer','LiverCirrhosis','Hepatitis','Parkinsonism','Malignancy','OldStroke','Dementia','Psychiatric','Gout']
+acute=['Pneumonia','UTI','GIB','Cellulitis','StrokeInEvolution','tPA','IA','tPAIA','Neurology_LOS']
+stroke=['Dissection','ACA','Undetermined','LVS','LVO','Side_Right','Side_Left','Side_Bilateral','Loc_CortSub','Loc_Subcortical','Loc_Infratentorial']
+nihss_in=['ConsIn','AnswerIn','OrderIn','EOMIn','VisualIn','FaceIn','LUIn','RUIn','LLIn','RLIn','CoordinateIn','SensoryIn','LanguageIn','ArticulateIn','NeglectIn']
+func=['MRS1','BI1','FOIS1','MNA1','EuroQoL5D1','IADL1','BBS1','FuglUE1','FuglSEN1','CCAT1','Initial_6MWT_Distance','Initial_GS']
+base=['Age','Sex, F0 M1']
+covars=base+acute+stroke+comorbid+nihss_in+func
+
+for c in covars+[a]:
+    df[c]=pd.to_numeric(df[c], errors='coerce')
+
+mask=t.notna() & y.notna()
+X=df.loc[mask,covars]
+t=t[mask].astype(int).to_numpy()
+y=y[mask].astype(int).to_numpy()
+
+ps_model=Pipeline([
+    ('imp',SimpleImputer(strategy='median')),
+    ('sc',StandardScaler()),
+    ('lr',LogisticRegression(max_iter=5000, solver='lbfgs'))
+])
+ps_model.fit(X,t)
+ps=np.clip(ps_model.predict_proba(X)[:,1],1e-3,1-1e-3)
+
+# Stabilized IPTW + 1/99 trimming
+p_t=t.mean()
+sw=np.where(t==1,p_t/ps,(1-p_t)/(1-ps))
+lo,hi=np.quantile(sw,[0.01,0.99])
+sw=np.clip(sw,lo,hi)
+
+def wmean(a,w): return np.sum(w*a)/np.sum(w)
+
+def wvar(a,w):
+    m=wmean(a,w)
+    num=np.sum(w*(a-m)**2)
+    den=np.sum(w)-np.sum(w**2)/np.sum(w)
+    return num/den if den>0 else num/np.sum(w)
+
+def smd(a,t,w=None):
+    a=np.asarray(a,float); t=np.asarray(t,int)
+    if w is None:
+        m1=a[t==1].mean(); m0=a[t==0].mean()
+        v1=a[t==1].var(ddof=0); v0=a[t==0].var(ddof=0)
+    else:
+        w=np.asarray(w,float)
+        m1=wmean(a[t==1],w[t==1]); m0=wmean(a[t==0],w[t==0])
+        v1=wvar(a[t==1],w[t==1]); v0=wvar(a[t==0],w[t==0])
+    den=np.sqrt((v1+v0)/2)
+    return 0.0 if den==0 else abs((m1-m0)/den)
+
+Ximp=pd.DataFrame(SimpleImputer(strategy='median').fit_transform(X),columns=covars)
+smd_pre={c:smd(Ximp[c].values,t) for c in covars}
+smd_post={c:smd(Ximp[c].values,t,sw) for c in covars}
+
+# IPTW effect on non-completion
+p1=wmean(y[t==1],sw[t==1])
+p0=wmean(y[t==0],sw[t==0])
+rd=p1-p0
+rr=p1/p0
+or_=(p1/(1-p1))/(p0/(1-p0))
+
+# Matching sensitivity (1:1 NN on logit-PS with caliper 0.2*SD)
+idx_t=np.where(t==1)[0]
+idx_c=np.where(t==0)[0]
+logit=np.log(ps/(1-ps))
+cal=0.2*np.std(logit)
+
+nn=NearestNeighbors(n_neighbors=1)
+nn.fit(logit[idx_c].reshape(-1,1))
+dist,ind=nn.kneighbors(logit[idx_t].reshape(-1,1))
+
+pairs=[]; used=set(); triples=[]
+for pos,treated_idx in enumerate(idx_t):
+    # ind[pos, 0] is neighbor position within the control subset fitted to NN.
+    triples.append((treated_idx,float(dist[pos,0]),int(ind[pos,0])))
+for treated_idx,d,control_pos in sorted(triples, key=lambda x:x[1]):
+    control_idx=idx_c[control_pos]
+    if d<=cal and control_idx not in used:
+        used.add(control_idx)
+        pairs.append((treated_idx,control_idx))
+
+mt=np.array([i for i,_ in pairs]); mc=np.array([j for _,j in pairs])
+p1m=y[mt].mean(); p0m=y[mc].mean()
+rdm=p1m-p0m
+orm=(p1m/(1-p1m))/(p0m/(1-p0m))
+
+print('IPTW RD=',rd,'RR=',rr,'OR=',or_)
+print('Match RD=',rdm,'OR=',orm)
+print('Covariates with SMD>0.1 pre/post:',sum(v>0.1 for v in smd_pre.values()),sum(v>0.1 for v in smd_post.values()))
+```
+
+## 4) Statistical results (computed on the provided de-identified workbook)
+- Sample: **N=633** (Hemorrhage=85, Ischemic=548)
+- Outcome prevalence (non-completion): **8.85%** overall
+- Unadjusted non-completion risk:
+  - Hemorrhage: **1.18%**
+  - Ischemic: **10.04%**
+  - Risk difference: **-8.86 percentage points**
+
+### Positivity / overlap
+- PS range (Hemorrhage): 0.0017 to 0.9864
+- PS range (Ischemic): 0.0010 to 0.9328
+- Common support interval: **[0.0017, 0.9328]**
+- In common support: **524/633**
+
+### Balance diagnostics (SMD)
+- Covariates with SMD > 0.1 before weighting: **44/65**
+- Covariates with SMD > 0.1 after IPTW: **28/65**
+- Max SMD pre: **0.609**
+- Max SMD post: **0.434**
+
+Largest residual post-IPTW imbalances: `LVS` (0.434), `LVO` (0.412), `Undetermined` (0.348), `AF` (0.315), `tPA` (0.252).
+
+### Primary IPTW effect estimate
+(Outcome = non-completion)
+- Weighted risk, Hemorrhage: **1.22%**
+- Weighted risk, Ischemic: **9.93%**
+- **Risk difference (ATE): -8.70 percentage points**
+- **Risk ratio: 0.123**
+- **Odds ratio: 0.112**
+
+### Sensitivity analysis (1:1 PS matching)
+- Matched pairs: **47** (of 85 hemorrhage cases)
+- Matched non-completion risk:
+  - Hemorrhage: **2.13%**
+  - Ischemic: **10.64%**
+- Matched risk difference: **-8.51 percentage points**
+- Matched odds ratio: **0.183**
+
+## 5) Interpretation
+1. Directionally, both IPTW and matching suggest lower observed non-completion risk in hemorrhagic vs ischemic patients after adjustment with T1 covariates.
+2. However, balance remained incomplete (many SMDs still >0.1), so causal interpretation should be cautious.
+3. The strongest residual imbalance is in stroke-etiology-related features (`LVS`, `LVO`, `Undetermined`), which indicates partial positivity/model-specification limitations for this exposure.
+4. Therefore, these numbers should be treated as exploratory estimates rather than definitive causal effects.
+5. For a confirmatory analysis, re-specify the PS model (nonlinear terms/interactions or boosted trees), consider overlap weighting or stronger trimming, and only finalize causal claims after balance is acceptable (target SMD < 0.1 across covariates).
+6. Following the DOCX guidance, this workflow correctly restricts PS covariates to baseline/T1 information and avoids post-T1 leakage into the PS model.
