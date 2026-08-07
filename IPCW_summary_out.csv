@@ -1,0 +1,25 @@
+Metric,Value
+N (total),633.0
+N completers,577.0
+N non-completers,56.0
+Completion rate (%),91.2
+IPCW weight mean,0.987
+IPCW weight SD,0.1184
+IPCW weight min,0.8865
+IPCW weight max,1.613
+Effective sample size (ESS),568.8
+N covariates SMD>0.1 pre-IPCW,41.0
+N covariates SMD>0.1 post-IPCW,0.0
+Max SMD post-IPCW,0.044
+6MWT4 model: IPCW WLS CV-R²,0.5692
+6MWT4 model: IPCW WLS RMSE,91.9
+6MWT4 model: IPCW WLS MAE,70.9
+6MWT4 model: Unweighted CV-R²,0.5692
+6MWT4 model: Unweighted RMSE,91.9
+6MWT4 model: Unweighted MAE,71.0
+Sens-1 Unstabilized IPCW CV-R²,0.5692
+Sens-1 Unstabilized IPCW RMSE,91.7
+Sens-1 Unstabilized IPCW MAE,70.7
+Sens-2 Multiple Imputation CV-R²,0.6512
+Sens-2 Multiple Imputation RMSE,84.5
+Sens-2 Multiple Imputation MAE,62.4
