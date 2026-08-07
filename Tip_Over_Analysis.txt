@@ -1,0 +1,43 @@
+Step 1 — Load prior artifacts and define missingness groups
+
+Instruct Copilot:
+
+"Load the cleaned dataset and the IPCW weights already saved from the prior script. Create a variable missing_outcome = 1 if 6MWT4 is null, else 0. Report counts: total N, completers, non-completers, and N with observed 6MWT4, confirming N=633, completers=577, non-completers=56, observed-outcome=511."
+
+Step 2 — Fit the base (MAR) outcome model
+
+"Using the existing IPCW-weighted WLS model for 6MWT4 (with T1 covariates), extract: (a) the fitted/predicted 6MWT4 for every subject with missing outcome, using their covariates; (b) the weighted mean of observed 6MWT4 among completers (M<em>obs); (c) the mean of the MAR-imputed values among the missing (M</em>mis_0). Print these two numbers explicitly."
+
+Step 3 — Build the Δ-shift pattern-mixture function
+
+"Write a function tipping<em>point(delta, df, weights, M</em>obs, M<em>mis</em>0, p_mis) that computes the population mean 6MWT4 as:
+
+M<em>total = (1-p</em>mis)<em>M_obs + p_mis</em>(M<em>mis</em>0 - delta)
+
+Vectorize this over a grid of delta from 0 to 150 meters in steps of 5."
+
+Step 4 — Solve for Δ_tip at each clinically meaningful threshold
+
+"For each threshold T in meters (representing MCID range and the community-ambulation cutoff), solve algebraically for deltatip = ((1-pmis)M_obs + p_misMmis0 - T)/pmis. Output a table: threshold, deltatip, and whether delta_tip falls within a clinically plausible range (define plausible as 0–75 m based on literature)."
+
+Step 5 — Generate the tipping-point curve
+
+"Plot Mtotal(delta) versus delta (x-axis: assumed meters of additional deficit among non-completers/missing, y-axis: population mean 6MWT4). Overlay horizontal reference lines at each threshold T. Mark the delta at which each line is crossed. Save as tipping</em>point_curve.png."
+
+Step 6 — Apply the same logic to individual-level pattern-mixture imputation (not just means)
+
+"Instead of shifting the mean only, implement a full pattern-mixture multiple imputation: for m = 1..50 imputations, impute missing 6MWT4 using the MI model already built, then subtract a fixed delta from each imputed value for non-completers only. Re-fit the outcome model on each shifted-imputed dataset, pool using Rubin's rules, and report the pooled coefficient/mean at each delta from Step 3's grid."
+
+Step 7 — Compare mean-shift vs. full pattern-mixture MI results
+
+"Produce a combined table: delta, mean-shift-tipping-point population mean, and pattern-mixture-MI pooled mean, to confirm the two approaches converge to similar delta_tip estimates. Flag any discrepancy >5 meters."
+
+Step 8 — Sensitivity to missingness fraction
+
+"Repeat the entire analysis using pmis = 56/633 (non-completers only) versus pmis = 122/633 (all missing-outcome, including completers with missing 6MWT4), and report both delta_tip tables side by side, since these give different robustness conclusions."
+
+Step 9 — Final report generation
+
+"Auto-generate a markdown summary reporting: N's, Mobs, Mmis0, the deltatip table across thresholds, the tipping-point plot, and a one-line interpretation: 'The primary estimate is robust to MNAR bias unless non-completers' true 6MWT4 is on average at least [X] meters lower than their MAR-imputed value.'"
+
+This sequence lets Copilot execute the pattern-mixture sensitivity analysis end-to-end while keeping each step auditable — reviewers typically want to see both the closed-form tipping-point equation (Steps 3–5) and a full multiple-imputation-based pattern-mixture confirmation (Steps 6–7), since they can occasionally diverge when covariate distributions differ substantially between completers and non-completers, which the SMD data already show (many baseline covariates had SMD > 0.1 pre-weighting).
