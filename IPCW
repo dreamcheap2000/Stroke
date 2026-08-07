@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+"""
+IPCW analysis for 6MWT4 in post-stroke PAC rehabilitation cohort.
+Follows the 7-step guide in IPCW.docx.
+
+Usage:
+    python IPCW <path_to_xlsx>
+  or set environment variable STROKE_XLSX_PATH.
+"""
+
+import os, sys
+import numpy as np
+import pandas as pd
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+from sklearn.impute import IterativeImputer
+from sklearn.model_selection import cross_val_score
+from sklearn.metrics import mean_squared_error
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 1 – Data loading and variable definitions
+# ─────────────────────────────────────────────────────────────────────────────
+path = sys.argv[1] if len(sys.argv) > 1 else os.getenv('STROKE_XLSX_PATH')
+if not path:
+    raise ValueError('Provide XLSX path via argv[1] or STROKE_XLSX_PATH env var.')
+
+df = pd.read_excel(path)
+print(f'Loaded dataset: {df.shape[0]} rows × {df.shape[1]} columns')
+
+# Outcome: 6MWT at discharge (T4) – continuous, numeric
+df['outcome_6mwt4'] = pd.to_numeric(df.get('6MWT4', df.get('6mwt4', np.nan)), errors='coerce')
+
+# Censoring indicator: 1 = completed PAC program, 0 = did not complete
+df['completer'] = (df['PAC_Program_Completion'] == 'Completed PAC program').astype(int)
+
+# T1-only covariate list (no post-T1 leakage)
+demographics  = ['Age', 'Sex, F0 M1']
+acute         = ['Pneumonia', 'UTI', 'GIB', 'Cellulitis', 'StrokeInEvolution',
+                 'tPA', 'IA', 'tPAIA', 'Neurology_LOS']
+stroke_chars  = ['Dissection', 'ACA', 'Undetermined', 'LVS', 'LVO',
+                 'Side_Right', 'Side_Left', 'Side_Bilateral',
+                 'Loc_CortSub', 'Loc_Subcortical', 'Loc_Infratentorial']
+comorbidities = ['AF', 'DM', 'HTN', 'Dyslipidemia', 'CAD', 'CKD',
+                 'RestrictiveLung', 'GIUlcer', 'LiverCirrhosis', 'Hepatitis',
+                 'Parkinsonism', 'Malignancy', 'OldStroke', 'Dementia',
+                 'Psychiatric', 'Gout']
+nihss_in      = ['ConsIn', 'AnswerIn', 'OrderIn', 'EOMIn', 'VisualIn',
+                 'FaceIn', 'LUIn', 'RUIn', 'LLIn', 'RLIn',
+                 'CoordinateIn', 'SensoryIn', 'LanguageIn', 'ArticulateIn',
+                 'NeglectIn']
+func_t1       = ['MRS1', 'BI1', 'FOIS1', 'MNA1', 'EuroQoL5D1', 'IADL1',
+                 'BBS1', 'FuglUE1', 'FuglSEN1', 'CCAT1',
+                 'Initial_6MWT_Distance', 'Initial_GS']
+
+covars = demographics + acute + stroke_chars + comorbidities + nihss_in + func_t1
+
+# Coerce covariates to numeric
+for c in covars:
+    if c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+
+# Keep only columns that exist in the dataset
+covars = [c for c in covars if c in df.columns]
+
+# Missingness report
+missing = df[covars + ['outcome_6mwt4', 'completer']].isnull().sum()
+missing = missing[missing > 0].sort_values(ascending=False)
+print('\n--- Missingness per column (columns with any missing) ---')
+print(missing.to_string())
+print(f'\nCompleters: {df["completer"].sum()}  |  Non-completers: {(df["completer"]==0).sum()}')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 2 – Censoring / completion model (denominator and numerator)
+# ─────────────────────────────────────────────────────────────────────────────
+# Use all rows with non-missing completer
+mask_all = df['completer'].notna()
+X_all = df.loc[mask_all, covars]
+y_comp = df.loc[mask_all, 'completer'].astype(int).to_numpy()
+
+# Denominator model: full T1 covariate logistic regression
+denom_model = Pipeline([
+    ('imp', SimpleImputer(strategy='median')),
+    ('sc',  StandardScaler()),
+    ('lr',  LogisticRegression(max_iter=5000, solver='lbfgs', C=1.0))
+])
+denom_model.fit(X_all, y_comp)
+p_denom = np.clip(denom_model.predict_proba(X_all)[:, 1], 1e-4, 1 - 1e-4)
+
+# Numerator model: marginal (intercept-only equivalent via Age-only baseline)
+# Marginalizing over observed completion rate
+numer_model = Pipeline([
+    ('imp', SimpleImputer(strategy='median')),
+    ('sc',  StandardScaler()),
+    ('lr',  LogisticRegression(max_iter=1000, solver='lbfgs', C=1e6))
+])
+numer_model.fit(X_all[['Age']], y_comp)
+p_numer = np.clip(numer_model.predict_proba(X_all[['Age']])[:, 1], 1e-4, 1 - 1e-4)
+
+print('\n--- Denominator model P(complete | X) summary ---')
+print(pd.Series(p_denom).describe().to_string())
+print('\n--- Numerator model P(complete | Age) summary ---')
+print(pd.Series(p_numer).describe().to_string())
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 3 – Construct stabilized IPCW weights (completers only)
+# ─────────────────────────────────────────────────────────────────────────────
+df_work = df.loc[mask_all].copy().reset_index(drop=True)
+df_work['p_denom'] = p_denom
+df_work['p_numer'] = p_numer
+
+# Stabilized weight for completers: P(C=1 | baseline) / P(C=1 | X)
+df_work['ipcw_raw'] = np.where(
+    df_work['completer'] == 1,
+    df_work['p_numer'] / df_work['p_denom'],
+    np.nan
+)
+
+# Winsorize at 1st/99th percentile (completers only)
+ipcw_vals = df_work.loc[df_work['completer'] == 1, 'ipcw_raw']
+lo, hi = np.nanquantile(ipcw_vals, [0.01, 0.99])
+df_work['ipcw'] = np.where(
+    df_work['completer'] == 1,
+    np.clip(df_work['ipcw_raw'], lo, hi),
+    np.nan
+)
+
+print('\n--- Stabilized IPCW weight distribution (completers, after winsorization) ---')
+w_summary = df_work.loc[df_work['completer'] == 1, 'ipcw'].describe()
+print(w_summary.to_string())
+mean_w = w_summary['mean']
+if abs(mean_w - 1.0) > 0.1:
+    print(f'WARNING: Mean weight {mean_w:.4f} deviates from 1.0 by more than 0.1 — check model.')
+else:
+    print(f'Mean weight {mean_w:.4f} is close to 1.0 (OK).')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 4 – Weighted outcome model for 6MWT4 (completers only)
+# ─────────────────────────────────────────────────────────────────────────────
+comp_mask = (df_work['completer'] == 1) & df_work['outcome_6mwt4'].notna()
+df_comp = df_work.loc[comp_mask].copy()
+
+imp_median = SimpleImputer(strategy='median')
+X_comp = pd.DataFrame(
+    imp_median.fit_transform(df_comp[covars]),
+    columns=covars
+)
+y_6mwt4 = df_comp['outcome_6mwt4'].to_numpy()
+w_ipcw  = df_comp['ipcw'].to_numpy()
+
+# Weighted linear regression (WLS)
+from sklearn.linear_model import Ridge
+wls = Ridge(alpha=1.0)
+wls.fit(X_comp, y_6mwt4, sample_weight=w_ipcw)
+y_pred_wls = wls.predict(X_comp)
+
+rmse_wls = np.sqrt(mean_squared_error(y_6mwt4, y_pred_wls, sample_weight=w_ipcw))
+mae_wls  = np.average(np.abs(y_6mwt4 - y_pred_wls), weights=w_ipcw)
+
+# CV R² (unweighted CV for comparability)
+cv_r2_wls = cross_val_score(Ridge(alpha=1.0), X_comp, y_6mwt4,
+                             cv=5, scoring='r2').mean()
+
+# Unweighted model (completers only, no IPCW)
+ols = Ridge(alpha=1.0)
+ols.fit(X_comp, y_6mwt4)
+y_pred_ols = ols.predict(X_comp)
+rmse_ols = np.sqrt(mean_squared_error(y_6mwt4, y_pred_ols))
+mae_ols  = np.mean(np.abs(y_6mwt4 - y_pred_ols))
+cv_r2_ols = cross_val_score(Ridge(alpha=1.0), X_comp, y_6mwt4,
+                             cv=5, scoring='r2').mean()
+
+print('\n--- Outcome model performance (6MWT4 prediction) ---')
+print(f'IPCW-weighted (WLS):  CV-R²={cv_r2_wls:.3f}  RMSE={rmse_wls:.1f}  MAE={mae_wls:.1f}')
+print(f'Unweighted (OLS):     CV-R²={cv_r2_ols:.3f}  RMSE={rmse_ols:.1f}  MAE={mae_ols:.1f}')
+
+# Top feature importances (by absolute coefficient magnitude)
+coef_df = pd.DataFrame({'covariate': covars, 'coef_wls': wls.coef_, 'coef_ols': ols.coef_})
+coef_df['abs_wls'] = coef_df['coef_wls'].abs()
+print('\n--- Top 10 features by |WLS coefficient| ---')
+print(coef_df.sort_values('abs_wls', ascending=False).head(10)
+      [['covariate', 'coef_wls', 'coef_ols']].to_string(index=False))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 5 – Balance diagnostics (SMD before/after IPCW)
+# ─────────────────────────────────────────────────────────────────────────────
+def wmean(a, w): return np.sum(w * a) / np.sum(w)
+
+def wvar(a, w):
+    m = wmean(a, w)
+    num = np.sum(w * (a - m) ** 2)
+    den = np.sum(w) - np.sum(w ** 2) / np.sum(w)
+    return num / den if den > 0 else num / np.sum(w)
+
+def smd_func(a, grp, w=None):
+    """SMD between completer (grp=1) and full/unweighted (grp=0) distributions."""
+    a = np.asarray(a, float)
+    grp = np.asarray(grp, int)
+    if w is None:
+        m1 = a[grp == 1].mean();  v1 = a[grp == 1].var(ddof=0)
+        m0 = a[grp == 0].mean();  v0 = a[grp == 0].var(ddof=0)
+    else:
+        w = np.asarray(w, float)
+        m1 = wmean(a[grp == 1], w[grp == 1]); v1 = wvar(a[grp == 1], w[grp == 1])
+        m0 = a[grp == 0].mean();               v0 = a[grp == 0].var(ddof=0)
+    den = np.sqrt((v1 + v0) / 2)
+    return 0.0 if den == 0 else abs((m1 - m0) / den)
+
+imp_all = SimpleImputer(strategy='median')
+X_imp_all = pd.DataFrame(
+    imp_all.fit_transform(df_work[covars]),
+    columns=covars
+)
+grp_all = df_work['completer'].astype(int).to_numpy()
+w_all   = df_work['ipcw'].fillna(0).to_numpy()   # non-completers get weight 0
+
+smd_pre  = {c: smd_func(X_imp_all[c].values, grp_all)          for c in covars}
+smd_post = {c: smd_func(X_imp_all[c].values, grp_all, w_all)   for c in covars}
+
+n_imbal_pre  = sum(v > 0.1 for v in smd_pre.values())
+n_imbal_post = sum(v > 0.1 for v in smd_post.values())
+
+print(f'\n--- Balance diagnostics ---')
+print(f'Covariates with SMD > 0.1 before weighting: {n_imbal_pre}/{len(covars)}')
+print(f'Covariates with SMD > 0.1 after  weighting: {n_imbal_post}/{len(covars)}')
+
+smd_df = pd.DataFrame({'covariate': covars,
+                        'SMD_pre': [smd_pre[c] for c in covars],
+                        'SMD_post': [smd_post[c] for c in covars]})
+flagged = smd_df[smd_df['SMD_post'] > 0.1].sort_values('SMD_post', ascending=False)
+if not flagged.empty:
+    print('\nFlagged (SMD > 0.1 after weighting):')
+    print(flagged.to_string(index=False))
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 6 – Sensitivity analyses
+# ─────────────────────────────────────────────────────────────────────────────
+
+# (1) Unstabilized IPCW (no numerator model)
+df_work['ipcw_unstab_raw'] = np.where(
+    df_work['completer'] == 1,
+    1.0 / df_work['p_denom'],
+    np.nan
+)
+lo_u, hi_u = np.nanquantile(df_work.loc[df_work['completer'] == 1, 'ipcw_unstab_raw'], [0.01, 0.99])
+df_work['ipcw_unstab'] = np.where(
+    df_work['completer'] == 1,
+    np.clip(df_work['ipcw_unstab_raw'], lo_u, hi_u),
+    np.nan
+)
+
+df_comp2 = df_work.loc[comp_mask].copy()
+w_unstab = df_comp2['ipcw_unstab'].to_numpy()
+wls_u = Ridge(alpha=1.0)
+wls_u.fit(X_comp, y_6mwt4, sample_weight=w_unstab)
+y_pred_u = wls_u.predict(X_comp)
+rmse_u = np.sqrt(mean_squared_error(y_6mwt4, y_pred_u, sample_weight=w_unstab))
+mae_u  = np.average(np.abs(y_6mwt4 - y_pred_u), weights=w_unstab)
+cv_r2_u = cross_val_score(Ridge(alpha=1.0), X_comp, y_6mwt4, cv=5, scoring='r2').mean()
+
+print(f'\n--- Sensitivity (1): Unstabilized IPCW ---')
+print(f'CV-R²={cv_r2_u:.3f}  RMSE={rmse_u:.1f}  MAE={mae_u:.1f}')
+print(f'Unstabilized weight mean={w_unstab.mean():.3f}')
+
+# (2) Multiple imputation of 6MWT4 for non-completers
+# Build a complete imputation dataset including 6MWT4
+mi_cols = covars + ['outcome_6mwt4']
+X_mi_input = df_work[mi_cols].copy()
+mi_imputer = IterativeImputer(max_iter=10, random_state=42, initial_strategy='median')
+X_mi_full  = pd.DataFrame(mi_imputer.fit_transform(X_mi_input), columns=mi_cols)
+
+y_mi   = X_mi_full['outcome_6mwt4'].to_numpy()
+X_mi_c = X_mi_full[covars]
+ols_mi = Ridge(alpha=1.0)
+ols_mi.fit(X_mi_c, y_mi)
+y_pred_mi = ols_mi.predict(X_mi_c)
+rmse_mi   = np.sqrt(mean_squared_error(y_mi, y_pred_mi))
+mae_mi    = np.mean(np.abs(y_mi - y_pred_mi))
+cv_r2_mi  = cross_val_score(Ridge(alpha=1.0), X_mi_c, y_mi, cv=5, scoring='r2').mean()
+
+print(f'\n--- Sensitivity (2): Multiple imputation of 6MWT4 for non-completers ---')
+print(f'CV-R²={cv_r2_mi:.3f}  RMSE={rmse_mi:.1f}  MAE={mae_mi:.1f}')
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STEP 7 – Summary table (CSV output)
+# ─────────────────────────────────────────────────────────────────────────────
+n_total      = df_work.shape[0]
+n_completers = int(df_work['completer'].sum())
+comp_rate    = n_completers / n_total * 100
+
+w_stats = df_work.loc[df_work['completer'] == 1, 'ipcw'].describe()
+
+summary_rows = [
+    {'Metric': 'N (total)',                     'Value': n_total},
+    {'Metric': 'N completers',                  'Value': n_completers},
+    {'Metric': 'N non-completers',              'Value': n_total - n_completers},
+    {'Metric': 'Completion rate (%)',            'Value': round(comp_rate, 1)},
+    {'Metric': 'IPCW weight mean',               'Value': round(w_stats['mean'], 4)},
+    {'Metric': 'IPCW weight SD',                 'Value': round(w_stats['std'], 4)},
+    {'Metric': 'IPCW weight min',                'Value': round(w_stats['min'], 4)},
+    {'Metric': 'IPCW weight max',                'Value': round(w_stats['max'], 4)},
+    {'Metric': 'N covariates SMD>0.1 pre-IPCW', 'Value': n_imbal_pre},
+    {'Metric': 'N covariates SMD>0.1 post-IPCW','Value': n_imbal_post},
+    {'Metric': '6MWT4 model: IPCW WLS CV-R²',   'Value': round(cv_r2_wls, 3)},
+    {'Metric': '6MWT4 model: IPCW WLS RMSE',    'Value': round(rmse_wls, 1)},
+    {'Metric': '6MWT4 model: IPCW WLS MAE',     'Value': round(mae_wls, 1)},
+    {'Metric': '6MWT4 model: Unweighted CV-R²', 'Value': round(cv_r2_ols, 3)},
+    {'Metric': '6MWT4 model: Unweighted RMSE',  'Value': round(rmse_ols, 1)},
+    {'Metric': '6MWT4 model: Unweighted MAE',   'Value': round(mae_ols, 1)},
+    {'Metric': 'Sens-1 Unstabilized IPCW CV-R²','Value': round(cv_r2_u, 3)},
+    {'Metric': 'Sens-1 Unstabilized IPCW RMSE', 'Value': round(rmse_u, 1)},
+    {'Metric': 'Sens-1 Unstabilized IPCW MAE',  'Value': round(mae_u, 1)},
+    {'Metric': 'Sens-2 Multiple Imputation CV-R²','Value': round(cv_r2_mi, 3)},
+    {'Metric': 'Sens-2 Multiple Imputation RMSE','Value': round(rmse_mi, 1)},
+    {'Metric': 'Sens-2 Multiple Imputation MAE', 'Value': round(mae_mi, 1)},
+]
+
+# SMD table for key covariates
+smd_rows = smd_df.copy()
+smd_rows['SMD_pre']  = smd_rows['SMD_pre'].round(3)
+smd_rows['SMD_post'] = smd_rows['SMD_post'].round(3)
+
+# Save outputs
+out_dir = os.path.dirname(os.path.abspath(__file__))
+summary_csv = os.path.join(out_dir, 'IPCW_summary.csv')
+smd_csv     = os.path.join(out_dir, 'IPCW_smd.csv')
+pd.DataFrame(summary_rows).to_csv(summary_csv, index=False)
+smd_rows.to_csv(smd_csv, index=False)
+
+print('\n=== IPCW SUMMARY TABLE ===')
+print(pd.DataFrame(summary_rows).to_string(index=False))
+print(f'\nSummary saved to: {summary_csv}')
+print(f'SMD table saved to: {smd_csv}')
