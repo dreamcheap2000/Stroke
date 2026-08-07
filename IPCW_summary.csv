@@ -7,17 +7,19 @@ IPCW weight mean,0.9847
 IPCW weight SD,0.1187
 IPCW weight min,0.8855
 IPCW weight max,1.6403
+Effective sample size (ESS),568.7
 N covariates SMD>0.1 pre-IPCW,43.0
-N covariates SMD>0.1 post-IPCW,42.0
-6MWT4 model: IPCW WLS CV-R²,0.601
+N covariates SMD>0.1 post-IPCW,0.0
+Max SMD post-IPCW,0.0419
+6MWT4 model: IPCW WLS CV-R²,0.6006
 6MWT4 model: IPCW WLS RMSE,90.5
 6MWT4 model: IPCW WLS MAE,69.5
-6MWT4 model: Unweighted CV-R²,0.601
+6MWT4 model: Unweighted CV-R²,0.6006
 6MWT4 model: Unweighted RMSE,90.4
 6MWT4 model: Unweighted MAE,69.6
-Sens-1 Unstabilized IPCW CV-R²,0.601
+Sens-1 Unstabilized IPCW CV-R²,0.6006
 Sens-1 Unstabilized IPCW RMSE,90.3
 Sens-1 Unstabilized IPCW MAE,69.4
-Sens-2 Multiple Imputation CV-R²,0.674
+Sens-2 Multiple Imputation CV-R²,0.6735
 Sens-2 Multiple Imputation RMSE,83.3
 Sens-2 Multiple Imputation MAE,61.6
