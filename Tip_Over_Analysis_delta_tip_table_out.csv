@@ -1,0 +1,9 @@
+scenario,threshold,threshold_value_m,delta_tip_m,plausible_0_75m
+pmis_noncompleters_56_633,MCID_-20m,293.733,226.071,False
+pmis_all_missing,MCID_-20m,293.733,48.374,True
+pmis_noncompleters_56_633,MCID_-34.4m,279.333,388.843,False
+pmis_all_missing,MCID_-34.4m,279.333,123.089,False
+pmis_noncompleters_56_633,MCID_-50m,263.733,565.179,False
+pmis_all_missing,MCID_-50m,263.733,204.03,False
+pmis_noncompleters_56_633,Community_ambulation_205m,205.0,1229.07,False
+pmis_all_missing,Community_ambulation_205m,205.0,508.767,False
