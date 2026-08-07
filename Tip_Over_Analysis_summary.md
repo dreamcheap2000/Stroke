@@ -9,7 +9,8 @@
 
 ## Base MAR model quantities
 - Weighted mean observed 6MWT4 among completers (M_obs): **319.915 m**
-- Mean MAR-imputed 6MWT4 among missing outcomes (M_mis_0): **233.396 m**
+- Mean MAR-imputed 6MWT4 among missing outcomes (M_mis_0, all missing): **233.396 m**
+- Mean MAR-imputed 6MWT4 among non-completer missing outcomes (M_mis_0, non-completers): **258.858 m**
 
 ## Delta-tip tables
 See `Tip_Over_Analysis_delta_tip_table.csv` for side-by-side results for:
@@ -23,4 +24,4 @@ See `Tip_Over_Analysis_results.csv` for delta-grid comparisons and discrepancy f
 - `tipping_point_curve.png`
 
 ## Interpretation
-The primary estimate is robust to MNAR bias unless non-completers' true 6MWT4 is on average at least **1212.4 meters** lower than their MAR-imputed value.
+The primary estimate is robust to MNAR bias unless non-completers' true 6MWT4 is on average at least **1237.9 meters** lower than their MAR-imputed value.

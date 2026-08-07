@@ -1,9 +1,9 @@
 scenario,threshold,threshold_value_m,delta_tip_m,plausible_0_75m
-pmis_noncompleters_56_633,MCID_-20m,292.261,226.071,False
-pmis_all_missing,MCID_-20m,292.261,56.965,True
-pmis_noncompleters_56_633,MCID_-34.4m,277.861,388.843,False
-pmis_all_missing,MCID_-34.4m,277.861,131.68,False
-pmis_noncompleters_56_633,MCID_-50m,262.261,565.179,False
-pmis_all_missing,MCID_-50m,262.261,212.621,False
-pmis_noncompleters_56_633,Community_ambulation_205m,205.0,1212.43,False
+pmis_noncompleters_56_633,MCID_-20m,294.513,226.071,False
+pmis_all_missing,MCID_-20m,294.513,45.278,True
+pmis_noncompleters_56_633,MCID_-34.4m,280.113,388.843,False
+pmis_all_missing,MCID_-34.4m,280.113,119.993,False
+pmis_noncompleters_56_633,MCID_-50m,264.513,565.179,False
+pmis_all_missing,MCID_-50m,264.513,200.934,False
+pmis_noncompleters_56_633,Community_ambulation_205m,205.0,1237.892,False
 pmis_all_missing,Community_ambulation_205m,205.0,509.72,False

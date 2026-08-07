@@ -60,10 +60,15 @@ def load_or_build_artifacts(xlsx_path: Path) -> tuple[pd.DataFrame, list[str]]:
 
     df = pd.read_excel(xlsx_path)
     df["outcome_6mwt4"] = pd.to_numeric(df.get("6MWT4", df.get("6mwt4", np.nan)), errors="coerce")
-    df["completer"] = (df["PAC_Program_Completion"] == "Completed PAC program").astype(int)
+    completion_status = df["PAC_Program_Completion"]
+    df["completer"] = np.where(
+        completion_status == "Completed PAC program",
+        1.0,
+        np.where(completion_status == "Did not complete PAC program", 0.0, np.nan),
+    )
     covars = get_covariates(df)
 
-    mask_all = df["completer"].notna()
+    mask_all = completion_status.notna()
     X_all = df.loc[mask_all, covars]
     y_comp = df.loc[mask_all, "completer"].astype(int).to_numpy()
 
@@ -74,6 +79,9 @@ def load_or_build_artifacts(xlsx_path: Path) -> tuple[pd.DataFrame, list[str]]:
     ])
     denom_model.fit(X_all, y_comp)
     p_denom = np.clip(denom_model.predict_proba(X_all)[:, 1], 1e-4, 1 - 1e-4)
+
+    if "Age" not in X_all.columns:
+        raise KeyError("Required covariate 'Age' not found for numerator IPCW model.")
 
     numer_model = Pipeline([
         ("imp", SimpleImputer(strategy="median")),
@@ -124,7 +132,7 @@ def main() -> None:
     df, covars = load_or_build_artifacts(xlsx_path)
 
     n_total = len(df)
-    n_completers = int(df["completer"].sum())
+    n_completers = int((df["completer"] == 1).sum())
     n_non_completers = int((df["completer"] == 0).sum())
     n_observed_all = int(df["outcome_6mwt4"].notna().sum())
     n_observed_completers = int(((df["completer"] == 1) & df["outcome_6mwt4"].notna()).sum())
@@ -145,17 +153,20 @@ def main() -> None:
     mar_pred_missing = base_model.predict(X_missing)
 
     m_obs = float(np.average(y_train, weights=w_train))
-    m_mis_0 = float(np.mean(mar_pred_missing))
+    m_mis_0_all = float(np.mean(mar_pred_missing))
+    miss_noncomp_mask = miss_mask & (df["completer"] == 0)
+    X_missing_noncomp = pd.DataFrame(imp.transform(df.loc[miss_noncomp_mask, covars]), columns=covars)
+    m_mis_0_noncomp = float(np.mean(base_model.predict(X_missing_noncomp)))
 
     p_mis_noncomp = n_non_completers / n_total
     p_mis_all_missing = float(miss_mask.mean())
 
     deltas = np.arange(0, 151, 5)
 
-    m_total_noncomp = tipping_point(deltas, m_obs, m_mis_0, p_mis_noncomp)
-    m_total_all_missing = tipping_point(deltas, m_obs, m_mis_0, p_mis_all_missing)
+    m_total_noncomp = tipping_point(deltas, m_obs, m_mis_0_noncomp, p_mis_noncomp)
+    m_total_all_missing = tipping_point(deltas, m_obs, m_mis_0_all, p_mis_all_missing)
 
-    mar_population_mean_noncomp = tipping_point(np.array([0.0]), m_obs, m_mis_0, p_mis_noncomp)[0]
+    mar_population_mean_noncomp = tipping_point(np.array([0.0]), m_obs, m_mis_0_noncomp, p_mis_noncomp)[0]
     thresholds = [
         ("MCID_-20m", mar_population_mean_noncomp - 20.0),
         ("MCID_-34.4m", mar_population_mean_noncomp - 34.4),
@@ -169,6 +180,7 @@ def main() -> None:
             ("pmis_noncompleters_56_633", p_mis_noncomp),
             ("pmis_all_missing", p_mis_all_missing),
         ]:
+            m_mis_0 = m_mis_0_noncomp if scenario_name == "pmis_noncompleters_56_633" else m_mis_0_all
             delta_tip = (((1 - p_mis) * m_obs) + (p_mis * m_mis_0) - t) / p_mis
             tip_rows.append(
                 {
@@ -187,7 +199,7 @@ def main() -> None:
     ax.plot(deltas, m_total_noncomp, marker="o", label="Mtotal(delta), p_mis=56/633")
     for name, t in thresholds:
         ax.axhline(y=t, linestyle="--", linewidth=1)
-        delta_cross = (((1 - p_mis_noncomp) * m_obs) + (p_mis_noncomp * m_mis_0) - t) / p_mis_noncomp
+        delta_cross = (((1 - p_mis_noncomp) * m_obs) + (p_mis_noncomp * m_mis_0_noncomp) - t) / p_mis_noncomp
         if 0 <= delta_cross <= 150:
             ax.scatter([delta_cross], [t], s=40)
             ax.text(delta_cross + 1, t + 1, f"{name}: Δ={delta_cross:.1f}", fontsize=8)
@@ -215,6 +227,7 @@ def main() -> None:
         imputed_outcomes.append(x_full["outcome_6mwt4"].to_numpy())
 
     x_model = pd.DataFrame(imp.transform(df[covars]), columns=covars)
+    noncomp_idx = (df["completer"] == 0).to_numpy()
 
     mi_rows = []
     for delta in deltas:
@@ -226,11 +239,10 @@ def main() -> None:
 
             model_mi = Ridge(alpha=1.0)
             model_mi.fit(x_model, y_shift)
-            y_hat = model_mi.predict(x_model)
-
-            q_m = float(np.mean(y_hat))
-            resid = y_shift - y_hat
-            u_m = float(np.var(resid, ddof=1) / len(y_shift))
+            pred_noncomp = model_mi.predict(x_model.loc[noncomp_idx])
+            m_noncomp_m = float(np.mean(pred_noncomp))
+            q_m = float((1 - p_mis_noncomp) * m_obs + p_mis_noncomp * m_noncomp_m)
+            u_m = float(np.var(pred_noncomp, ddof=1) / max(pred_noncomp.shape[0], 1))
             q_vals.append(q_m)
             u_vals.append(u_m)
 
@@ -255,7 +267,8 @@ def main() -> None:
         {"metric": "N_observed_6MWT4_all", "value": n_observed_all},
         {"metric": "N_observed_6MWT4_completers", "value": n_observed_completers},
         {"metric": "M_obs_weighted", "value": m_obs},
-        {"metric": "M_mis0_MAR_predicted", "value": m_mis_0},
+        {"metric": "M_mis0_MAR_predicted_all_missing", "value": m_mis_0_all},
+        {"metric": "M_mis0_MAR_predicted_noncompleters", "value": m_mis_0_noncomp},
         {"metric": "p_mis_noncompleters", "value": p_mis_noncomp},
         {"metric": "p_mis_all_missing", "value": p_mis_all_missing},
     ])
@@ -271,6 +284,7 @@ def main() -> None:
     # Step 9 summary markdown
     community_row = tip_df[(tip_df["scenario"] == "pmis_noncompleters_56_633") & (tip_df["threshold"] == "Community_ambulation_205m")]
     x_value = float(community_row.iloc[0]["delta_tip_m"]) if not community_row.empty else float("nan")
+    n_missing_total = int(miss_mask.sum())
 
     md_lines = [
         "# Tip-Over (Tipping-Point) Analysis Summary",
@@ -284,12 +298,13 @@ def main() -> None:
         "",
         "## Base MAR model quantities",
         f"- Weighted mean observed 6MWT4 among completers (M_obs): **{m_obs:.3f} m**",
-        f"- Mean MAR-imputed 6MWT4 among missing outcomes (M_mis_0): **{m_mis_0:.3f} m**",
+        f"- Mean MAR-imputed 6MWT4 among missing outcomes (M_mis_0, all missing): **{m_mis_0_all:.3f} m**",
+        f"- Mean MAR-imputed 6MWT4 among non-completer missing outcomes (M_mis_0, non-completers): **{m_mis_0_noncomp:.3f} m**",
         "",
         "## Delta-tip tables",
         "See `Tip_Over_Analysis_delta_tip_table.csv` for side-by-side results for:",
-        "- p_mis = 56/633 (non-completers only)",
-        "- p_mis = 122/633 equivalent to all missing-outcome fraction in this dataset",
+        f"- p_mis = {n_non_completers}/{n_total} (non-completers only)",
+        f"- p_mis = {n_missing_total}/{n_total} equivalent to all missing-outcome fraction in this dataset",
         "",
         "## Mean-shift vs full pattern-mixture MI",
         "See `Tip_Over_Analysis_results.csv` for delta-grid comparisons and discrepancy flags (`>5m`).",
@@ -305,7 +320,7 @@ def main() -> None:
 
     print("Tip-over analysis complete.")
     print(f"N={n_total}, completers={n_completers}, non-completers={n_non_completers}, observed-outcome={n_observed_completers}")
-    print(f"M_obs={m_obs:.3f}, M_mis_0={m_mis_0:.3f}")
+    print(f"M_obs={m_obs:.3f}, M_mis_0_all={m_mis_0_all:.3f}, M_mis_0_noncomp={m_mis_0_noncomp:.3f}")
     print(f"Saved: {counts_path.name}, {tip_path.name}, {compare_path.name}, tipping_point_curve.png, Tip_Over_Analysis_summary.md")
 
 
