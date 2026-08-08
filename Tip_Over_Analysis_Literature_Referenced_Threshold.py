@@ -16,7 +16,7 @@ from sklearn.preprocessing import StandardScaler
 
 
 ROOT = Path(__file__).resolve().parent
-ARTIFACT_CSV = ROOT / "Tip_Over_Analysis_artifacts_Literature_Referenced_Threshold.csv"
+ARTIFACT_CSV = ROOT / "Tip_Over_Analysis_artifacts_out.csv"
 
 
 def get_covariates(df: pd.DataFrame) -> list[str]:
@@ -350,8 +350,19 @@ def main() -> None:
     # Step 9 summary markdown
     primary_rows = tip_df[tip_df["scenario"] == "pmis_noncompleters_56_633"]
     n_missing_total = int(miss_mask.sum())
-    min_delta = float(primary_rows["delta_tip"].min()) if not primary_rows.empty else float("nan")
-    max_delta = float(primary_rows["delta_tip"].max()) if not primary_rows.empty else float("nan")
+    nonnegative_primary = primary_rows[primary_rows["delta_tip"] >= 0]
+    already_crossed_count = int((primary_rows["delta_tip"] < 0).sum())
+    min_delta = float(nonnegative_primary["delta_tip"].min()) if not nonnegative_primary.empty else float("nan")
+    max_delta = float(nonnegative_primary["delta_tip"].max()) if not nonnegative_primary.empty else float("nan")
+    plausible_primary = nonnegative_primary[
+        nonnegative_primary["plausibility_flag"] == "within_observed_range_clinically_plausible"
+    ]
+    plausible_text = (
+        f" The smallest literature-anchored shift that remains within the observed plausibility range is **{float(plausible_primary['delta_tip'].min()):.1f} meters**."
+        if not plausible_primary.empty
+        else " No non-negative threshold crossings remain within the observed plausibility range."
+    )
+    crossed_label = "threshold is" if already_crossed_count == 1 else "thresholds are"
 
     md_lines = [
         "# Tip-Over (Tipping-Point) Analysis Summary",
@@ -380,7 +391,11 @@ def main() -> None:
         "- `tipping_point_curve_Literature_Referenced_Threshold.png`",
         "",
         "## Interpretation",
-        f"Across the literature-anchored thresholds, the primary estimate tips when non-completers' true 6MWT4 is on average between **{min_delta:.1f}** and **{max_delta:.1f} meters** lower than their MAR-imputed value.",
+        (
+            f"Under the primary scenario, **{already_crossed_count}** literature {crossed_label} already crossed at the MAR estimate; "
+            f"the remaining thresholds require non-completers' true 6MWT4 to average between **{min_delta:.1f}** and **{max_delta:.1f} meters** lower than their MAR-imputed value."
+            f"{plausible_text}"
+        ),
     ]
 
     (ROOT / "Tip_Over_Analysis_summary_Literature_Referenced_Threshold.md").write_text("\n".join(md_lines), encoding="utf-8")
