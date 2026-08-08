@@ -368,8 +368,8 @@ smd_rows['SMD_post'] = smd_rows['SMD_post'].round(3)
 
 # Save outputs
 out_dir = os.path.dirname(os.path.abspath(__file__))
-summary_csv = os.path.join(out_dir, 'IPCW_summary_out.csv')
-smd_csv     = os.path.join(out_dir, 'IPCW_smd_out.csv')
+summary_csv = os.path.join(out_dir, 'IPCW_summary_out_202608081955.csv')
+smd_csv     = os.path.join(out_dir, 'IPCW_smd_out_202608081955.csv')
 pd.DataFrame(summary_rows).to_csv(summary_csv, index=False)
 smd_rows.to_csv(smd_csv, index=False)
 

@@ -1,0 +1,11 @@
+metric,value
+N_total,633.0
+N_completers,577.0
+N_non_completers,56.0
+N_observed_6MWT4_all,511.0
+N_observed_6MWT4_completers,511.0
+M_obs_weighted,319.9173350163411
+M_mis0_MAR_predicted_all_missing,202.61265260323088
+M_mis0_MAR_predicted_noncompleters,244.4039747629795
+p_mis_noncompleters,0.08846761453396525
+p_mis_all_missing,0.19273301737756715

@@ -4,7 +4,7 @@ IPCW analysis for 6MWT4 in post-stroke PAC rehabilitation cohort.
 Follows the 7-step guide in IPCW.docx.
 
 Usage:
-    python IPCW_Out.py <path_to_xlsx>
+    python IPCW <path_to_xlsx>
   or set environment variable STROKE_XLSX_PATH.
 """
 
@@ -47,28 +47,15 @@ comorbidities = ['AF', 'DM', 'HTN', 'Dyslipidemia', 'CAD', 'CKD',
                  'RestrictiveLung', 'GIUlcer', 'LiverCirrhosis', 'Hepatitis',
                  'Parkinsonism', 'Malignancy', 'OldStroke', 'Dementia',
                  'Psychiatric', 'Gout']
-nihss_out = [
-    'ConsOut',
-    'AnswerOut',
-    'OrderOut',
-    'EOMOut',
-    'VisualOut',
-    'FaceOut',
-    'LUOut',
-    'RUOut',
-    'LLOut',
-    'RLOut',
-    'CoordinateOut',
-    'SensoryOut',
-    'LanguageOut',
-    'ArticulateOut',
-    'NeglectOut',
-]
+nihss_in      = ['ConsIn', 'AnswerIn', 'OrderIn', 'EOMIn', 'VisualIn',
+                 'FaceIn', 'LUIn', 'RUIn', 'LLIn', 'RLIn',
+                 'CoordinateIn', 'SensoryIn', 'LanguageIn', 'ArticulateIn',
+                 'NeglectIn']
 func_t1       = ['MRS1', 'BI1', 'FOIS1', 'MNA1', 'EuroQoL5D1', 'IADL1',
                  'BBS1', 'FuglUE1', 'FuglSEN1', 'CCAT1',
                  '6MWT1', 'Gait_Speed_1']
 
-covars = demographics + acute + stroke_chars + comorbidities + nihss_out + func_t1
+covars = demographics + acute + stroke_chars + comorbidities + nihss_in + func_t1
 
 # Coerce covariates to numeric
 for c in covars:
@@ -368,8 +355,8 @@ smd_rows['SMD_post'] = smd_rows['SMD_post'].round(3)
 
 # Save outputs
 out_dir = os.path.dirname(os.path.abspath(__file__))
-summary_csv = os.path.join(out_dir, 'IPCW_summary_out.csv')
-smd_csv     = os.path.join(out_dir, 'IPCW_smd_out.csv')
+summary_csv = os.path.join(out_dir, 'IPCW_summary_202608081955.csv')
+smd_csv     = os.path.join(out_dir, 'IPCW_smd_202608081955.csv')
 pd.DataFrame(summary_rows).to_csv(summary_csv, index=False)
 smd_rows.to_csv(smd_csv, index=False)
 

@@ -16,7 +16,7 @@ from sklearn.preprocessing import StandardScaler
 
 
 ROOT = Path(__file__).resolve().parent
-ARTIFACT_CSV = ROOT / "Tip_Over_Analysis_artifacts.csv"
+ARTIFACT_CSV = ROOT / "Tip_Over_Analysis_artifacts_out_202608081955.csv"
 
 
 def get_covariates(df: pd.DataFrame) -> list[str]:
@@ -32,15 +32,15 @@ def get_covariates(df: pd.DataFrame) -> list[str]:
         "AF", "DM", "HTN", "Dyslipidemia", "CAD", "CKD", "RestrictiveLung", "GIUlcer", "LiverCirrhosis",
         "Hepatitis", "Parkinsonism", "Malignancy", "OldStroke", "Dementia", "Psychiatric", "Gout"
     ]
-    nihss_in = [
-        "ConsIn", "AnswerIn", "OrderIn", "EOMIn", "VisualIn", "FaceIn", "LUIn", "RUIn", "LLIn", "RLIn",
-        "CoordinateIn", "SensoryIn", "LanguageIn", "ArticulateIn", "NeglectIn"
+    nihss_out = [
+        "ConsOut", "AnswerOut", "OrderOut", "EOMOut", "VisualOut", "FaceOut", "LUOut", "RUOut", "LLOut", "RLOut",
+        "CoordinateOut", "SensoryOut", "LanguageOut", "ArticulateOut", "NeglectOut"
     ]
     func_t1 = [
         "MRS1", "BI1", "FOIS1", "MNA1", "EuroQoL5D1", "IADL1", "BBS1", "FuglUE1", "FuglSEN1", "CCAT1",
         "6MWT1", "Gait_Speed_1"
     ]
-    covars = demographics + acute + stroke_chars + comorbidities + nihss_in + func_t1
+    covars = demographics + acute + stroke_chars + comorbidities + nihss_out + func_t1
 
     for c in covars:
         if c in df.columns:
@@ -210,7 +210,7 @@ def main() -> None:
     ax.grid(alpha=0.25)
     ax.legend()
     fig.tight_layout()
-    plot_path = ROOT / "tipping_point_curve.png"
+    plot_path = ROOT / "tipping_point_curve_out_202608081955.png"
     fig.savefig(plot_path, dpi=200)
     plt.close(fig)
 
@@ -273,9 +273,9 @@ def main() -> None:
         {"metric": "p_mis_all_missing", "value": p_mis_all_missing},
     ])
 
-    counts_path = ROOT / "Tip_Over_Analysis_counts.csv"
-    tip_path = ROOT / "Tip_Over_Analysis_delta_tip_table.csv"
-    compare_path = ROOT / "Tip_Over_Analysis_results.csv"
+    counts_path = ROOT / "Tip_Over_Analysis_counts_out_202608081955.csv"
+    tip_path = ROOT / "Tip_Over_Analysis_delta_tip_table_out_202608081955.csv"
+    compare_path = ROOT / "Tip_Over_Analysis_results_out_202608081955.csv"
 
     counts_df.to_csv(counts_path, index=False)
     tip_df.to_csv(tip_path, index=False)
@@ -302,26 +302,26 @@ def main() -> None:
         f"- Mean MAR-imputed 6MWT4 among non-completer missing outcomes (M_mis_0, non-completers): **{m_mis_0_noncomp:.3f} m**",
         "",
         "## Delta-tip tables",
-        "See `Tip_Over_Analysis_delta_tip_table.csv` for side-by-side results for:",
+        "See `Tip_Over_Analysis_delta_tip_table_out.csv` for side-by-side results for:",
         f"- p_mis = {n_non_completers}/{n_total} (non-completers only)",
         f"- p_mis = {n_missing_total}/{n_total} equivalent to all missing-outcome fraction in this dataset",
         "",
         "## Mean-shift vs full pattern-mixture MI",
-        "See `Tip_Over_Analysis_results.csv` for delta-grid comparisons and discrepancy flags (`>5m`).",
+        "See `Tip_Over_Analysis_results_out.csv` for delta-grid comparisons and discrepancy flags (`>5m`).",
         "",
         "## Plot",
-        "- `tipping_point_curve.png`",
+        "- `tipping_point_curve_out.png`",
         "",
         "## Interpretation",
         f"The primary estimate is robust to MNAR bias unless non-completers' true 6MWT4 is on average at least **{x_value:.1f} meters** lower than their MAR-imputed value.",
     ]
 
-    (ROOT / "Tip_Over_Analysis_summary.md").write_text("\n".join(md_lines), encoding="utf-8")
+    (ROOT / "Tip_Over_Analysis_summary_out_202608081955.md").write_text("\n".join(md_lines), encoding="utf-8")
 
     print("Tip-over analysis complete.")
     print(f"N={n_total}, completers={n_completers}, non-completers={n_non_completers}, observed-outcome={n_observed_completers}")
     print(f"M_obs={m_obs:.3f}, M_mis_0_all={m_mis_0_all:.3f}, M_mis_0_noncomp={m_mis_0_noncomp:.3f}")
-    print(f"Saved: {counts_path.name}, {tip_path.name}, {compare_path.name}, tipping_point_curve.png, Tip_Over_Analysis_summary.md")
+    print(f"Saved: {counts_path.name}, {tip_path.name}, {compare_path.name}, tipping_point_curve_out.png, Tip_Over_Analysis_summary_out.md")
 
 
 if __name__ == "__main__":

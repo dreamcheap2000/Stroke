@@ -38,7 +38,7 @@ def get_covariates(df: pd.DataFrame) -> list[str]:
     ]
     func_t1 = [
         "MRS1", "BI1", "FOIS1", "MNA1", "EuroQoL5D1", "IADL1", "BBS1", "FuglUE1", "FuglSEN1", "CCAT1",
-        "Initial_6MWT_Distance", "Initial_GS"
+        "6MWT1", "Gait_Speed_1"
     ]
     covars = demographics + acute + stroke_chars + comorbidities + nihss_out + func_t1
 
