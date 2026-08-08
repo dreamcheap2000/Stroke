@@ -197,6 +197,7 @@ def main() -> None:
         raise FileNotFoundError(f"Cannot find input XLSX: {xlsx_path}")
 
     df, covars = load_or_build_artifacts(xlsx_path)
+    df = df.reset_index(drop=True)
 
     n_total = len(df)
     n_completers = int((df["completer"] == 1).sum())
@@ -234,6 +235,7 @@ def main() -> None:
     m_total_all_missing = tipping_point(deltas, m_obs, m_mis_0_all, p_mis_all_missing)
 
     mar_population_mean_noncomp = tipping_point(np.array([0.0]), m_obs, m_mis_0_noncomp, p_mis_noncomp)[0]
+    mar_population_mean_all_missing = tipping_point(np.array([0.0]), m_obs, m_mis_0_all, p_mis_all_missing)[0]
 
     tip_rows = []
     for scenario_name, p_mis in [
@@ -241,8 +243,13 @@ def main() -> None:
         ("pmis_all_missing", p_mis_all_missing),
     ]:
         m_mis_0 = m_mis_0_noncomp if scenario_name == "pmis_noncompleters_56_633" else m_mis_0_all
+        reference_mean = (
+            mar_population_mean_noncomp
+            if scenario_name == "pmis_noncompleters_56_633"
+            else mar_population_mean_all_missing
+        )
         for threshold in LITERATURE_THRESHOLDS:
-            target_mean = resolve_target_mean(mar_population_mean_noncomp, threshold)
+            target_mean = resolve_target_mean(reference_mean, threshold)
             delta_tip = (((1 - p_mis) * m_obs) + (p_mis * m_mis_0) - target_mean) / p_mis
             true_mean_at_tip = m_mis_0 - delta_tip
             tip_rows.append(
