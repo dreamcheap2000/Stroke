@@ -123,6 +123,10 @@ def rubins_rules(q: np.ndarray, u: np.ndarray) -> tuple[float, float]:
     return q_bar, np.sqrt(max(t, 0.0))
 
 
+def delta_to_reach_target(target_mean: float, m_obs: float, m_mis_0: float, p_mis: float) -> float:
+    return (((1 - p_mis) * m_obs) + (p_mis * m_mis_0) - target_mean) / p_mis
+
+
 LITERATURE_THRESHOLDS = [
     {
         "threshold_type": "change_based_mcid_general_low",
@@ -250,7 +254,7 @@ def main() -> None:
         )
         for threshold in LITERATURE_THRESHOLDS:
             target_mean = resolve_target_mean(reference_mean, threshold)
-            delta_tip = (((1 - p_mis) * m_obs) + (p_mis * m_mis_0) - target_mean) / p_mis
+            delta_tip = delta_to_reach_target(target_mean, m_obs, m_mis_0, p_mis)
             true_mean_at_tip = m_mis_0 - delta_tip
             tip_rows.append(
                 {
@@ -272,7 +276,7 @@ def main() -> None:
     for threshold in LITERATURE_THRESHOLDS:
         target_mean = resolve_target_mean(mar_population_mean_noncomp, threshold)
         ax.axhline(y=target_mean, linestyle="--", linewidth=1)
-        delta_cross = (((1 - p_mis_noncomp) * m_obs) + (p_mis_noncomp * m_mis_0_noncomp) - target_mean) / p_mis_noncomp
+        delta_cross = delta_to_reach_target(target_mean, m_obs, m_mis_0_noncomp, p_mis_noncomp)
         if 0 <= delta_cross <= 150:
             ax.scatter([delta_cross], [target_mean], s=40)
             ax.text(delta_cross + 1, target_mean + 1, f"{threshold['threshold_type']}: Δ={delta_cross:.1f}", fontsize=8)
@@ -292,6 +296,9 @@ def main() -> None:
     mi_cols = covars + ["outcome_6mwt4"]
     mi_input = df[mi_cols].copy()
     noncomp_missing_mask = (df["completer"] == 0) & miss_mask
+    noncomp_missing_idx = noncomp_missing_mask.to_numpy()
+    if not mi_input.index.equals(df.index):
+        raise ValueError("MI input and working dataframe indices must stay aligned.")
 
     imputed_outcomes = []
     for m in range(m_imputations):
@@ -308,7 +315,7 @@ def main() -> None:
         u_vals = []
         for y_imp in imputed_outcomes:
             y_shift = y_imp.copy()
-            y_shift[noncomp_missing_mask.to_numpy()] = y_shift[noncomp_missing_mask.to_numpy()] - delta
+            y_shift[noncomp_missing_idx] = y_shift[noncomp_missing_idx] - delta
 
             model_mi = Ridge(alpha=1.0)
             model_mi.fit(x_model, y_shift)
@@ -356,7 +363,7 @@ def main() -> None:
 
     # Step 9 summary markdown
     primary_rows = tip_df[tip_df["scenario"] == "pmis_noncompleters_56_633"]
-    n_missing_total = int(miss_mask.sum())
+    n_missing_total = n_total - n_observed_all
     nonnegative_primary = primary_rows[primary_rows["delta_tip"] >= 0]
     already_crossed_count = int((primary_rows["delta_tip"] < 0).sum())
     min_delta = float(nonnegative_primary["delta_tip"].min()) if not nonnegative_primary.empty else float("nan")
