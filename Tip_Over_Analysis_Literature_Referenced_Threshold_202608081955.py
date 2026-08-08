@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tip-over (tipping-point) MNAR sensitivity analysis for 6MWT4."""
+"""Tip-over (tipping-point) MNAR sensitivity analysis for 6MWT4 using literature-referenced thresholds."""
 
 import os
 import sys
@@ -16,7 +16,7 @@ from sklearn.preprocessing import StandardScaler
 
 
 ROOT = Path(__file__).resolve().parent
-ARTIFACT_CSV = ROOT / "Tip_Over_Analysis_artifacts.csv"
+ARTIFACT_CSV = ROOT / "Tip_Over_Analysis_artifacts_out.csv"
 
 
 def get_covariates(df: pd.DataFrame) -> list[str]:
@@ -32,15 +32,15 @@ def get_covariates(df: pd.DataFrame) -> list[str]:
         "AF", "DM", "HTN", "Dyslipidemia", "CAD", "CKD", "RestrictiveLung", "GIUlcer", "LiverCirrhosis",
         "Hepatitis", "Parkinsonism", "Malignancy", "OldStroke", "Dementia", "Psychiatric", "Gout"
     ]
-    nihss_in = [
-        "ConsIn", "AnswerIn", "OrderIn", "EOMIn", "VisualIn", "FaceIn", "LUIn", "RUIn", "LLIn", "RLIn",
-        "CoordinateIn", "SensoryIn", "LanguageIn", "ArticulateIn", "NeglectIn"
+    nihss_out = [
+        "ConsOut", "AnswerOut", "OrderOut", "EOMOut", "VisualOut", "FaceOut", "LUOut", "RUOut", "LLOut", "RLOut",
+        "CoordinateOut", "SensoryOut", "LanguageOut", "ArticulateOut", "NeglectOut"
     ]
     func_t1 = [
         "MRS1", "BI1", "FOIS1", "MNA1", "EuroQoL5D1", "IADL1", "BBS1", "FuglUE1", "FuglSEN1", "CCAT1",
         "6MWT1", "Gait_Speed_1"
     ]
-    covars = demographics + acute + stroke_chars + comorbidities + nihss_in + func_t1
+    covars = demographics + acute + stroke_chars + comorbidities + nihss_out + func_t1
 
     for c in covars:
         if c in df.columns:
@@ -123,6 +123,77 @@ def rubins_rules(q: np.ndarray, u: np.ndarray) -> tuple[float, float]:
     return q_bar, np.sqrt(max(t, 0.0))
 
 
+def delta_to_reach_target(target_mean: float, m_obs: float, m_mis_0: float, p_mis: float) -> float:
+    return (((1 - p_mis) * m_obs) + (p_mis * m_mis_0) - target_mean) / p_mis
+
+
+LITERATURE_THRESHOLDS = [
+    {
+        "threshold_type": "change_based_mcid_general_low",
+        "threshold_value": 14.0,
+        "citation_label": "Bohannon_Crouch_MCID_low",
+        "target_mode": "baseline_minus_value",
+    },
+    {
+        "threshold_type": "change_based_mcid_general_high",
+        "threshold_value": 30.5,
+        "citation_label": "Bohannon_Crouch_MCID_high",
+        "target_mode": "baseline_minus_value",
+    },
+    {
+        "threshold_type": "change_based_mcid_neuro_musculoskeletal",
+        "threshold_value": 37.0,
+        "citation_label": "Daynes_MetaAnalysis_MID_neuro_msk",
+        "target_mode": "baseline_minus_value",
+    },
+    {
+        "threshold_type": "change_based_mic_stroke_subacute_low",
+        "threshold_value": 63.0,
+        "citation_label": "Kubo_2022_MIC_low",
+        "target_mode": "baseline_minus_value",
+    },
+    {
+        "threshold_type": "change_based_mic_stroke_subacute_high",
+        "threshold_value": 83.0,
+        "citation_label": "Kubo_2022_MIC_high",
+        "target_mode": "baseline_minus_value",
+    },
+    {
+        "threshold_type": "absolute_distance_cutoff_independence_kubo",
+        "threshold_value": 304.0,
+        "citation_label": "Kubo_2022_FAC_independence_cutoff",
+        "target_mode": "absolute_value",
+    },
+    {
+        "threshold_type": "absolute_distance_cutoff_community_blennerhassett",
+        "threshold_value": 367.0,
+        "citation_label": "Blennerhassett_community_ambulation_cutoff",
+        "target_mode": "absolute_value",
+    },
+    {
+        "threshold_type": "absolute_distance_cutoff_fac3_to_fac4_lee",
+        "threshold_value": 99.35,
+        "citation_label": "Lee_FAC3_to_FAC4_cutoff",
+        "target_mode": "absolute_value",
+    },
+]
+PLAUSIBILITY_FAC2_FLOOR_M = 140.0
+
+
+def resolve_target_mean(reference_mean: float, threshold: dict[str, float | str]) -> float:
+    if threshold["target_mode"] == "baseline_minus_value":
+        return reference_mean - float(threshold["threshold_value"])
+    return float(threshold["threshold_value"])
+
+
+def classify_plausibility(true_mean_at_tip: float) -> str:
+    if true_mean_at_tip < 0:
+        return "physically_impossible_below_0m"
+    if true_mean_at_tip < PLAUSIBILITY_FAC2_FLOOR_M:
+        return "clinically_implausible_below_fac2_mean"
+    return "within_observed_range_clinically_plausible"
+
+
 def main() -> None:
     xlsx_arg = sys.argv[1] if len(sys.argv) > 1 else os.getenv("STROKE_XLSX_PATH")
     xlsx_path = Path(xlsx_arg) if xlsx_arg else ROOT / "20260806_DeID.xlsx"
@@ -130,6 +201,7 @@ def main() -> None:
         raise FileNotFoundError(f"Cannot find input XLSX: {xlsx_path}")
 
     df, covars = load_or_build_artifacts(xlsx_path)
+    df = df.reset_index(drop=True)
 
     n_total = len(df)
     n_completers = int((df["completer"] == 1).sum())
@@ -167,50 +239,55 @@ def main() -> None:
     m_total_all_missing = tipping_point(deltas, m_obs, m_mis_0_all, p_mis_all_missing)
 
     mar_population_mean_noncomp = tipping_point(np.array([0.0]), m_obs, m_mis_0_noncomp, p_mis_noncomp)[0]
-    thresholds = [
-        ("MCID_-20m", mar_population_mean_noncomp - 20.0),
-        ("MCID_-34.4m", mar_population_mean_noncomp - 34.4),
-        ("MCID_-50m", mar_population_mean_noncomp - 50.0),
-        ("Community_ambulation_205m", 205.0),
-    ]
+    mar_population_mean_all_missing = tipping_point(np.array([0.0]), m_obs, m_mis_0_all, p_mis_all_missing)[0]
 
     tip_rows = []
-    for name, t in thresholds:
-        for scenario_name, p_mis in [
-            ("pmis_noncompleters_56_633", p_mis_noncomp),
-            ("pmis_all_missing", p_mis_all_missing),
-        ]:
-            m_mis_0 = m_mis_0_noncomp if scenario_name == "pmis_noncompleters_56_633" else m_mis_0_all
-            delta_tip = (((1 - p_mis) * m_obs) + (p_mis * m_mis_0) - t) / p_mis
+    for scenario_name, p_mis in [
+        ("pmis_noncompleters_56_633", p_mis_noncomp),
+        ("pmis_all_missing", p_mis_all_missing),
+    ]:
+        m_mis_0 = m_mis_0_noncomp if scenario_name == "pmis_noncompleters_56_633" else m_mis_0_all
+        reference_mean = (
+            mar_population_mean_noncomp
+            if scenario_name == "pmis_noncompleters_56_633"
+            else mar_population_mean_all_missing
+        )
+        for threshold in LITERATURE_THRESHOLDS:
+            target_mean = resolve_target_mean(reference_mean, threshold)
+            delta_tip = delta_to_reach_target(target_mean, m_obs, m_mis_0, p_mis)
+            true_mean_at_tip = m_mis_0 - delta_tip
             tip_rows.append(
                 {
                     "scenario": scenario_name,
-                    "threshold": name,
-                    "threshold_value_m": round(t, 3),
-                    "delta_tip_m": round(float(delta_tip), 3),
-                    "plausible_0_75m": bool((0 <= delta_tip) and (delta_tip <= 75)),
+                    "threshold_type": threshold["threshold_type"],
+                    "threshold_value": round(float(threshold["threshold_value"]), 3),
+                    "citation_label": threshold["citation_label"],
+                    "delta_tip": round(float(delta_tip), 3),
+                    "true_mean_at_tip": round(float(true_mean_at_tip), 3),
+                    "plausibility_flag": classify_plausibility(float(true_mean_at_tip)),
                 }
             )
 
     tip_df = pd.DataFrame(tip_rows)
 
     # Step 5: plot for primary scenario (non-completer fraction)
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(12, 7))
     ax.plot(deltas, m_total_noncomp, marker="o", label="Mtotal(delta), p_mis=56/633")
-    for name, t in thresholds:
-        ax.axhline(y=t, linestyle="--", linewidth=1)
-        delta_cross = (((1 - p_mis_noncomp) * m_obs) + (p_mis_noncomp * m_mis_0_noncomp) - t) / p_mis_noncomp
+    for threshold in LITERATURE_THRESHOLDS:
+        target_mean = resolve_target_mean(mar_population_mean_noncomp, threshold)
+        ax.axhline(y=target_mean, linestyle="--", linewidth=1)
+        delta_cross = delta_to_reach_target(target_mean, m_obs, m_mis_0_noncomp, p_mis_noncomp)
         if 0 <= delta_cross <= 150:
-            ax.scatter([delta_cross], [t], s=40)
-            ax.text(delta_cross + 1, t + 1, f"{name}: Δ={delta_cross:.1f}", fontsize=8)
+            ax.scatter([delta_cross], [target_mean], s=40)
+            ax.text(delta_cross + 1, target_mean + 1, f"{threshold['threshold_type']}: Δ={delta_cross:.1f}", fontsize=8)
 
     ax.set_xlabel("Assumed extra deficit among missing/non-completers (delta, meters)")
     ax.set_ylabel("Population mean 6MWT4 (meters)")
-    ax.set_title("Tipping-point curve (mean-shift pattern-mixture)")
+    ax.set_title("Tipping-point curve with literature-referenced thresholds")
     ax.grid(alpha=0.25)
     ax.legend()
     fig.tight_layout()
-    plot_path = ROOT / "tipping_point_curve.png"
+    plot_path = ROOT / "tipping_point_curve_Literature_Referenced_Threshold_202608081955.png"
     fig.savefig(plot_path, dpi=200)
     plt.close(fig)
 
@@ -219,6 +296,9 @@ def main() -> None:
     mi_cols = covars + ["outcome_6mwt4"]
     mi_input = df[mi_cols].copy()
     noncomp_missing_mask = (df["completer"] == 0) & miss_mask
+    noncomp_missing_idx = noncomp_missing_mask.to_numpy()
+    if not mi_input.index.equals(df.index):
+        raise ValueError("MI input and working dataframe indices must stay aligned.")
 
     imputed_outcomes = []
     for m in range(m_imputations):
@@ -235,7 +315,7 @@ def main() -> None:
         u_vals = []
         for y_imp in imputed_outcomes:
             y_shift = y_imp.copy()
-            y_shift[noncomp_missing_mask.to_numpy()] = y_shift[noncomp_missing_mask.to_numpy()] - delta
+            y_shift[noncomp_missing_idx] = y_shift[noncomp_missing_idx] - delta
 
             model_mi = Ridge(alpha=1.0)
             model_mi.fit(x_model, y_shift)
@@ -273,18 +353,30 @@ def main() -> None:
         {"metric": "p_mis_all_missing", "value": p_mis_all_missing},
     ])
 
-    counts_path = ROOT / "Tip_Over_Analysis_counts.csv"
-    tip_path = ROOT / "Tip_Over_Analysis_delta_tip_table.csv"
-    compare_path = ROOT / "Tip_Over_Analysis_results.csv"
+    counts_path = ROOT / "Tip_Over_Analysis_counts_Literature_Referenced_Threshold_202608081955.csv"
+    tip_path = ROOT / "tipping_point_by_threshold_Literature_Referenced_Threshold_202608081955.csv"
+    compare_path = ROOT / "Tip_Over_Analysis_results_Literature_Referenced_Threshold_202608081955.csv"
 
     counts_df.to_csv(counts_path, index=False)
     tip_df.to_csv(tip_path, index=False)
     compare_df.to_csv(compare_path, index=False)
 
     # Step 9 summary markdown
-    community_row = tip_df[(tip_df["scenario"] == "pmis_noncompleters_56_633") & (tip_df["threshold"] == "Community_ambulation_205m")]
-    x_value = float(community_row.iloc[0]["delta_tip_m"]) if not community_row.empty else float("nan")
-    n_missing_total = int(miss_mask.sum())
+    primary_rows = tip_df[tip_df["scenario"] == "pmis_noncompleters_56_633"]
+    n_missing_total = n_total - n_observed_all
+    nonnegative_primary = primary_rows[primary_rows["delta_tip"] >= 0]
+    already_crossed_count = int((primary_rows["delta_tip"] < 0).sum())
+    min_delta = float(nonnegative_primary["delta_tip"].min()) if not nonnegative_primary.empty else float("nan")
+    max_delta = float(nonnegative_primary["delta_tip"].max()) if not nonnegative_primary.empty else float("nan")
+    plausible_primary = nonnegative_primary[
+        nonnegative_primary["plausibility_flag"] == "within_observed_range_clinically_plausible"
+    ]
+    plausible_text = (
+        f" The smallest literature-anchored shift that remains within the observed plausibility range is **{float(plausible_primary['delta_tip'].min()):.1f} meters**."
+        if not plausible_primary.empty
+        else " No non-negative threshold crossings remain within the observed plausibility range."
+    )
+    crossed_label = "threshold is" if already_crossed_count == 1 else "thresholds are"
 
     md_lines = [
         "# Tip-Over (Tipping-Point) Analysis Summary",
@@ -301,27 +393,31 @@ def main() -> None:
         f"- Mean MAR-imputed 6MWT4 among missing outcomes (M_mis_0, all missing): **{m_mis_0_all:.3f} m**",
         f"- Mean MAR-imputed 6MWT4 among non-completer missing outcomes (M_mis_0, non-completers): **{m_mis_0_noncomp:.3f} m**",
         "",
-        "## Delta-tip tables",
-        "See `Tip_Over_Analysis_delta_tip_table.csv` for side-by-side results for:",
+        "## Literature-referenced tipping thresholds",
+        "See `tipping_point_by_threshold_Literature_Referenced_Threshold.csv` for side-by-side results for:",
         f"- p_mis = {n_non_completers}/{n_total} (non-completers only)",
         f"- p_mis = {n_missing_total}/{n_total} equivalent to all missing-outcome fraction in this dataset",
         "",
         "## Mean-shift vs full pattern-mixture MI",
-        "See `Tip_Over_Analysis_results.csv` for delta-grid comparisons and discrepancy flags (`>5m`).",
+        "See `Tip_Over_Analysis_results_Literature_Referenced_Threshold.csv` for delta-grid comparisons and discrepancy flags (`>5m`).",
         "",
         "## Plot",
-        "- `tipping_point_curve.png`",
+        "- `tipping_point_curve_Literature_Referenced_Threshold.png`",
         "",
         "## Interpretation",
-        f"The primary estimate is robust to MNAR bias unless non-completers' true 6MWT4 is on average at least **{x_value:.1f} meters** lower than their MAR-imputed value.",
+        (
+            f"Under the primary scenario, **{already_crossed_count}** literature {crossed_label} already crossed at the MAR estimate; "
+            f"the remaining thresholds require non-completers' true 6MWT4 to average between **{min_delta:.1f}** and **{max_delta:.1f} meters** lower than their MAR-imputed value."
+            f"{plausible_text}"
+        ),
     ]
 
-    (ROOT / "Tip_Over_Analysis_summary.md").write_text("\n".join(md_lines), encoding="utf-8")
+    (ROOT / "Tip_Over_Analysis_summary_Literature_Referenced_Threshold_202608081955.md").write_text("\n".join(md_lines), encoding="utf-8")
 
     print("Tip-over analysis complete.")
     print(f"N={n_total}, completers={n_completers}, non-completers={n_non_completers}, observed-outcome={n_observed_completers}")
     print(f"M_obs={m_obs:.3f}, M_mis_0_all={m_mis_0_all:.3f}, M_mis_0_noncomp={m_mis_0_noncomp:.3f}")
-    print(f"Saved: {counts_path.name}, {tip_path.name}, {compare_path.name}, tipping_point_curve.png, Tip_Over_Analysis_summary.md")
+    print(f"Saved: {counts_path.name}, {tip_path.name}, {compare_path.name}, tipping_point_curve_Literature_Referenced_Threshold.png, Tip_Over_Analysis_summary_Literature_Referenced_Threshold.md")
 
 
 if __name__ == "__main__":

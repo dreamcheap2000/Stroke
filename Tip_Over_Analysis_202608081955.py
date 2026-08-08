@@ -16,7 +16,7 @@ from sklearn.preprocessing import StandardScaler
 
 
 ROOT = Path(__file__).resolve().parent
-ARTIFACT_CSV = ROOT / "Tip_Over_Analysis_artifacts.csv"
+ARTIFACT_CSV = ROOT / "Tip_Over_Analysis_artifacts_202608081955.csv"
 
 
 def get_covariates(df: pd.DataFrame) -> list[str]:
@@ -210,7 +210,7 @@ def main() -> None:
     ax.grid(alpha=0.25)
     ax.legend()
     fig.tight_layout()
-    plot_path = ROOT / "tipping_point_curve.png"
+    plot_path = ROOT / "tipping_point_curve_202608081955.png"
     fig.savefig(plot_path, dpi=200)
     plt.close(fig)
 
@@ -273,9 +273,9 @@ def main() -> None:
         {"metric": "p_mis_all_missing", "value": p_mis_all_missing},
     ])
 
-    counts_path = ROOT / "Tip_Over_Analysis_counts.csv"
-    tip_path = ROOT / "Tip_Over_Analysis_delta_tip_table.csv"
-    compare_path = ROOT / "Tip_Over_Analysis_results.csv"
+    counts_path = ROOT / "Tip_Over_Analysis_counts_202608081955.csv"
+    tip_path = ROOT / "Tip_Over_Analysis_delta_tip_table_202608081955.csv"
+    compare_path = ROOT / "Tip_Over_Analysis_results_202608081955.csv"
 
     counts_df.to_csv(counts_path, index=False)
     tip_df.to_csv(tip_path, index=False)
@@ -316,7 +316,7 @@ def main() -> None:
         f"The primary estimate is robust to MNAR bias unless non-completers' true 6MWT4 is on average at least **{x_value:.1f} meters** lower than their MAR-imputed value.",
     ]
 
-    (ROOT / "Tip_Over_Analysis_summary.md").write_text("\n".join(md_lines), encoding="utf-8")
+    (ROOT / "Tip_Over_Analysis_summary_202608081955.md").write_text("\n".join(md_lines), encoding="utf-8")
 
     print("Tip-over analysis complete.")
     print(f"N={n_total}, completers={n_completers}, non-completers={n_non_completers}, observed-outcome={n_observed_completers}")
