@@ -60,3 +60,16 @@ Run:
 ```bash
 python IPCW_Table_202608090845.py
 ```
+
+### E) Binary 6MWT scenario dataset and model reports
+- Script: `Binary_1038_20260826.py`
+- Input dataset: `20260806_DeID.xlsx`
+- Produces:
+  - `20260826_DeID.xlsx`
+  - `20260826_Binary_1038.docx`
+  - `20260826_Binary_1038_Code.docx`
+
+Run:
+```bash
+python Binary_1038_20260826.py
+```
