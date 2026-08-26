@@ -36,7 +36,7 @@ from sklearn.metrics import (
     r2_score,
     recall_score,
 )
-from sklearn.model_selection import StratifiedKFold, cross_val_predict, cross_validate
+from sklearn.model_selection import StratifiedKFold, cross_val_predict, cross_val_score, cross_validate
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
@@ -270,7 +270,6 @@ def predict_6mwt4_standard(df: pd.DataFrame, features: list[str]) -> dict:
     ridge.fit(X, y)
     y_pred = ridge.predict(X)
 
-    from sklearn.model_selection import cross_val_score
     cv_r2 = cross_val_score(Ridge(alpha=1.0), X, y, cv=5, scoring="r2").mean()
     mae = mean_absolute_error(y, y_pred)
     r2 = r2_score(y, y_pred)
@@ -415,7 +414,6 @@ def predict_6mwt4_ipcw(
     ridge_w.fit(X_comp, y_comp, sample_weight=w)
     y_pred_comp = ridge_w.predict(X_comp)
 
-    from sklearn.model_selection import cross_val_score
     cv_r2 = cross_val_score(Ridge(alpha=1.0), X_comp, y_comp, cv=5, scoring="r2").mean()
     mae_comp = float(np.average(np.abs(y_comp - y_pred_comp), weights=w))
     r2_comp = r2_score(y_comp, y_pred_comp, sample_weight=w)
@@ -676,11 +674,14 @@ def main() -> None:
     df["6MWT4"] = pd.to_numeric(df.get("6MWT4", np.nan), errors="coerce")
 
     # ── Build new column ordering for output Excel ────────────────────────────
-    category_cols = (
-        DEMOGRAPHICS_PAC + STROKE_INFO + COMORBIDITIES_PAC + ACUTE_COMPLICATIONS_PAC
-        + FUNCTIONAL_T1_PLUS_GS_IMPUTED
-        + NIHSS_OUT + NIHSS_IN + T1T2_IMPROVEMENT
-    )
+    category_cols = [
+        c for c in (
+            DEMOGRAPHICS_PAC + STROKE_INFO + COMORBIDITIES_PAC + ACUTE_COMPLICATIONS_PAC
+            + FUNCTIONAL_T1_PLUS_GS_IMPUTED
+            + NIHSS_OUT + NIHSS_IN + T1T2_IMPROVEMENT
+        )
+        if c in df.columns
+    ]
     remaining = [c for c in df.columns if c not in category_cols]
     df_out = df[category_cols + remaining].copy()
 
