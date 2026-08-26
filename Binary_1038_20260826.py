@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from docx import Document
 from docx.shared import Pt
+from sklearn.base import clone
 from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import ExtraTreesClassifier, RandomForestClassifier
 from sklearn.impute import SimpleImputer
@@ -34,7 +35,6 @@ OUTPUT_REPORT = ROOT / "20260826_Binary_1038.docx"
 OUTPUT_CODE = ROOT / "20260826_Binary_1038_Code.docx"
 
 RANDOM_STATE = 42
-CV = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
 
 DEMOGRAPHICS_PAC = ["Age", "Sex, F0 M1"]
 STROKE_INFO = [
@@ -97,6 +97,10 @@ GROUPED_COLUMNS = (
 MODEL_FEATURES = DEMOGRAPHICS_PAC + FUNCTIONAL_T1_PLUS_GS_IMPUTED
 
 
+def make_cv() -> StratifiedKFold:
+    return StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+
+
 def set_code_font(paragraph) -> None:
     for run in paragraph.runs:
         run.font.name = "Courier New"
@@ -122,7 +126,14 @@ def add_table(document: Document, rows: list[list[str]]) -> None:
 
 
 def build_modified_dataset(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.rename(columns={"IA": "EVT", "tPAIA": "tPA+EVT"}).copy()
+    rename_map = {"IA": "EVT", "tPAIA": "tPA+EVT"}
+    missing_rename_sources = [old for old in rename_map if old not in df.columns]
+    if missing_rename_sources:
+        raise KeyError(f"Required source columns are missing before renaming: {missing_rename_sources}")
+    conflicting_targets = [new for old, new in rename_map.items() if old in df.columns and new in df.columns]
+    if conflicting_targets:
+        raise ValueError(f"Cannot rename columns because targets already exist: {conflicting_targets}")
+    df = df.rename(columns=rename_map)
 
     first_6mwt = df["First_6MWT_TP"].astype("string")
     completion = df["PAC_Program_Completion"].astype("string")
@@ -140,12 +151,26 @@ def build_modified_dataset(df: pd.DataFrame) -> pd.DataFrame:
     worst.loc[observed_6mwt] = 1
     worst.loc[never_6mwt] = 0
 
-    df["6MWT_Best_Scenario"] = best.astype("Int64")
-    df["6MWT_Worst_Scenario"] = worst.astype("Int64")
+    df = pd.concat(
+        [
+            df,
+            pd.DataFrame(
+                {
+                    "6MWT_Best_Scenario": best.astype("Int64"),
+                    "6MWT_Worst_Scenario": worst.astype("Int64"),
+                },
+                index=df.index,
+            ),
+        ],
+        axis=1,
+    )
 
-    grouped_existing = [column for column in GROUPED_COLUMNS if column in df.columns]
-    remaining = [column for column in df.columns if column not in grouped_existing]
-    return df[grouped_existing + remaining]
+    missing_grouped = [column for column in GROUPED_COLUMNS if column not in df.columns]
+    if missing_grouped:
+        raise KeyError(f"Required grouped columns are missing after restructuring: {missing_grouped}")
+
+    remaining = [column for column in df.columns if column not in GROUPED_COLUMNS]
+    return df[GROUPED_COLUMNS + remaining]
 
 
 def build_candidates() -> dict[str, dict[str, object]]:
@@ -155,7 +180,7 @@ def build_candidates() -> dict[str, dict[str, object]]:
             ("scaler", StandardScaler()),
         ]
     )
-    passthrough_transformer = Pipeline([("imputer", SimpleImputer(strategy="median"))])
+    imputer_only_transformer = Pipeline([("imputer", SimpleImputer(strategy="median"))])
 
     logistic = Pipeline(
         [
@@ -173,7 +198,7 @@ def build_candidates() -> dict[str, dict[str, object]]:
     )
     random_forest = Pipeline(
         [
-            ("prep", ColumnTransformer([("num", passthrough_transformer, MODEL_FEATURES)])),
+            ("prep", ColumnTransformer([("num", imputer_only_transformer, MODEL_FEATURES)])),
             (
                 "model",
                 RandomForestClassifier(
@@ -181,14 +206,14 @@ def build_candidates() -> dict[str, dict[str, object]]:
                     min_samples_leaf=2,
                     class_weight="balanced",
                     random_state=RANDOM_STATE,
-                    n_jobs=-1,
+                    n_jobs=1,
                 ),
             ),
         ]
     )
     extra_trees = Pipeline(
         [
-            ("prep", ColumnTransformer([("num", passthrough_transformer, MODEL_FEATURES)])),
+            ("prep", ColumnTransformer([("num", imputer_only_transformer, MODEL_FEATURES)])),
             (
                 "model",
                 ExtraTreesClassifier(
@@ -196,7 +221,7 @@ def build_candidates() -> dict[str, dict[str, object]]:
                     min_samples_leaf=2,
                     class_weight="balanced",
                     random_state=RANDOM_STATE,
-                    n_jobs=-1,
+                    n_jobs=1,
                 ),
             ),
         ]
@@ -205,15 +230,15 @@ def build_candidates() -> dict[str, dict[str, object]]:
     return {
         "Logistic Regression": {
             "pipeline": logistic,
-            "code": """Pipeline([\n    ('prep', ColumnTransformer([\n        ('num', Pipeline([\n            ('imputer', SimpleImputer(strategy='median')),\n            ('scaler', StandardScaler()),\n        ]), MODEL_FEATURES)\n    ])),\n    ('model', LogisticRegression(max_iter=5000, solver='liblinear', class_weight='balanced', random_state=42)),\n])""",
+            "code": """best_pipeline = Pipeline([\n    ('prep', ColumnTransformer([\n        ('num', Pipeline([\n            ('imputer', SimpleImputer(strategy='median')),\n            ('scaler', StandardScaler()),\n        ]), MODEL_FEATURES)\n    ])),\n    ('model', LogisticRegression(max_iter=5000, solver='liblinear', class_weight='balanced', random_state=42)),\n])""",
         },
         "Random Forest": {
             "pipeline": random_forest,
-            "code": """Pipeline([\n    ('prep', ColumnTransformer([\n        ('num', Pipeline([\n            ('imputer', SimpleImputer(strategy='median')),\n        ]), MODEL_FEATURES)\n    ])),\n    ('model', RandomForestClassifier(n_estimators=500, min_samples_leaf=2, class_weight='balanced', random_state=42, n_jobs=-1)),\n])""",
+            "code": """best_pipeline = Pipeline([\n    ('prep', ColumnTransformer([\n        ('num', Pipeline([\n            ('imputer', SimpleImputer(strategy='median')),\n        ]), MODEL_FEATURES)\n    ])),\n    ('model', RandomForestClassifier(n_estimators=500, min_samples_leaf=2, class_weight='balanced', random_state=42, n_jobs=1)),\n])""",
         },
         "Extra Trees": {
             "pipeline": extra_trees,
-            "code": """Pipeline([\n    ('prep', ColumnTransformer([\n        ('num', Pipeline([\n            ('imputer', SimpleImputer(strategy='median')),\n        ]), MODEL_FEATURES)\n    ])),\n    ('model', ExtraTreesClassifier(n_estimators=500, min_samples_leaf=2, class_weight='balanced', random_state=42, n_jobs=-1)),\n])""",
+            "code": """best_pipeline = Pipeline([\n    ('prep', ColumnTransformer([\n        ('num', Pipeline([\n            ('imputer', SimpleImputer(strategy='median')),\n        ]), MODEL_FEATURES)\n    ])),\n    ('model', ExtraTreesClassifier(n_estimators=500, min_samples_leaf=2, class_weight='balanced', random_state=42, n_jobs=1)),\n])""",
         },
     }
 
@@ -222,6 +247,7 @@ def evaluate_target(df: pd.DataFrame, target: str) -> dict[str, object]:
     model_df = df[MODEL_FEATURES + [target]].dropna(subset=[target]).copy()
     X = model_df[MODEL_FEATURES]
     y = model_df[target].astype(int)
+    cv_splits = list(make_cv().split(X, y))
 
     candidates = build_candidates()
     scoring = {
@@ -238,7 +264,7 @@ def evaluate_target(df: pd.DataFrame, target: str) -> dict[str, object]:
             payload["pipeline"],
             X,
             y,
-            cv=CV,
+            cv=cv_splits,
             scoring=scoring,
             n_jobs=-1,
         )
@@ -259,9 +285,9 @@ def evaluate_target(df: pd.DataFrame, target: str) -> dict[str, object]:
         .reset_index(drop=True)
     )
     best_name = str(leaderboard.iloc[0]["model"])
-    best_pipeline = candidates[best_name]["pipeline"]
+    best_pipeline_template = clone(candidates[best_name]["pipeline"])
 
-    oof_predictions = cross_val_predict(best_pipeline, X, y, cv=CV, n_jobs=-1)
+    oof_predictions = cross_val_predict(clone(best_pipeline_template), X, y, cv=cv_splits, n_jobs=-1)
     metrics = {
         "accuracy": float(accuracy_score(y, oof_predictions)),
         "balanced_accuracy": float(balanced_accuracy_score(y, oof_predictions)),
@@ -271,22 +297,30 @@ def evaluate_target(df: pd.DataFrame, target: str) -> dict[str, object]:
     }
 
     tn, fp, fn, tp = confusion_matrix(y, oof_predictions, labels=[0, 1]).ravel()
-    best_pipeline.fit(X, y)
-    importance = permutation_importance(
-        best_pipeline,
-        X,
-        y,
-        scoring="balanced_accuracy",
-        n_repeats=30,
-        random_state=RANDOM_STATE,
-        n_jobs=-1,
-    )
+    fold_importances = []
+    for fold_index, (train_idx, test_idx) in enumerate(cv_splits):
+        fold_pipeline = clone(best_pipeline_template)
+        X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
+        y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
+        fold_pipeline.fit(X_train, y_train)
+        fold_importance = permutation_importance(
+            fold_pipeline,
+            X_test,
+            y_test,
+            scoring="balanced_accuracy",
+            n_repeats=30,
+            random_state=RANDOM_STATE + fold_index,
+            n_jobs=-1,
+        )
+        fold_importances.append(fold_importance.importances_mean)
+
+    importance_array = np.vstack(fold_importances)
     importance_df = (
         pd.DataFrame(
             {
                 "predictor": MODEL_FEATURES,
-                "importance_mean": importance.importances_mean,
-                "importance_std": importance.importances_std,
+                "importance_mean": importance_array.mean(axis=0),
+                "importance_std": importance_array.std(axis=0, ddof=1),
             }
         )
         .sort_values("importance_mean", ascending=False)
@@ -404,8 +438,13 @@ def write_code_doc(results: list[dict[str, object]]) -> None:
 
         code = (
             result["best_model_code"]
-            + "\n\nbest_pipeline.fit(X, y)\n"
-            + "permutation_importance(best_pipeline, X, y, scoring='balanced_accuracy', n_repeats=30, random_state=42, n_jobs=-1)"
+            + "\n\ncv_splits = list(StratifiedKFold(n_splits=5, shuffle=True, random_state=42).split(X, y))\n"
+            + "for fold_index, (train_idx, test_idx) in enumerate(cv_splits):\n"
+            + "    fold_pipeline = clone(best_pipeline)\n"
+            + "    X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]\n"
+            + "    y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]\n"
+            + "    fold_pipeline.fit(X_train, y_train)\n"
+            + "    permutation_importance(fold_pipeline, X_test, y_test, scoring='balanced_accuracy', n_repeats=30, random_state=42 + fold_index, n_jobs=-1)"
         )
         paragraph = doc.add_paragraph(code)
         set_code_font(paragraph)
