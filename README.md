@@ -73,3 +73,16 @@ Run:
 ```bash
 python Binary_1038_20260826.py
 ```
+
+### F) Tiered IPCW 6MWT4 extrapolation outputs
+- Script: `20260828_5_Tiers_1201.py`
+- Input dataset: `20260826_DeID.xlsx`
+  - (This dataset is derived from `20260806_DeID.xlsx` via script E.)
+- Produces:
+  - `20260828_DeID_IPCW_Predicted_6MWT.xlsx`
+  - `20260828_5_Tiers_1201.docx`
+
+Run:
+```bash
+python 20260828_5_Tiers_1201.py
+```
