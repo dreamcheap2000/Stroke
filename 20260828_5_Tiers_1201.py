@@ -399,6 +399,9 @@ def compute_ipcw_weights(df: pd.DataFrame, features: list[str]) -> dict:
         P(completed PAC | Age) when Age exists, otherwise the first tier feature
     """
     valid = _filter_existing(features, df)
+    if not valid:
+        raise ValueError("At least one valid feature is required to compute IPCW weights.")
+
     completion_status = df["PAC_Program_Completion"].astype("string")
     eligible_mask = completion_status.notna()
     completed = completion_status.eq("Completed PAC program").astype(int)
@@ -513,17 +516,18 @@ def predict_6mwt4_ipcw(
     # scenario/tier combination is populated for non-completers.
     noncompleter_mask = completion_status.ne("Completed PAC program") & completion_status.notna()
     df_noncompleters = df.loc[noncompleter_mask].copy()
+    X_noncompleters_raw = df_noncompleters[valid]
     X_noncompleters = pd.DataFrame(
         imputer.transform(df_noncompleters[valid]),
         columns=valid,
         index=df_noncompleters.index,
     )
 
-    walk_predictions = binary_result["best_pipeline"].predict(X_noncompleters).astype(int)
+    walk_predictions = binary_result["best_pipeline"].predict(X_noncompleters_raw).astype(int)
     predicted_6mwt4 = np.zeros(len(df_noncompleters), dtype="float64")
     walk_rows = walk_predictions == 1
     if walk_rows.any():
-        predicted_6mwt4[walk_rows] = np.maximum(0, final_model.predict(X_noncompleters.loc[walk_rows]))
+        predicted_6mwt4[walk_rows] = np.maximum(0, final_model.predict(X_noncompleters[walk_rows]))
 
     return {
         "features": valid,
