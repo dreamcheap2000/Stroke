@@ -12,6 +12,7 @@ Output:
 from __future__ import annotations
 
 from collections import Counter
+import math
 from pathlib import Path
 from statistics import mean
 
@@ -112,11 +113,25 @@ def parse_latest_ipcw_models() -> list[dict]:
             key=lambda x: (x["balanced_accuracy"], x["accuracy"], x["f1"]),
             reverse=True,
         )
+        if not leaderboard:
+            continue
         balacc_margin = (
             leaderboard[0]["balanced_accuracy"] - leaderboard[1]["balanced_accuracy"]
-            if len(leaderboard) > 1
+            if len(leaderboard) >= 2
             else 0.0
         )
+
+        def _to_float(value: str) -> float:
+            try:
+                return float(value)
+            except ValueError:
+                return float("nan")
+
+        def _to_int(value: str, default: int = 0) -> int:
+            try:
+                return int(value)
+            except ValueError:
+                return default
 
         parsed.append(
             {
@@ -126,14 +141,14 @@ def parse_latest_ipcw_models() -> list[dict]:
                 "ipcw_numerator": metric_dict.get("IPCW numerator model", ""),
                 "ipcw_winsorization": metric_dict.get("IPCW winsorization", ""),
                 "binary_model": metric_dict.get("Selected binary model", ""),
-                "bal_acc": float(metric_dict.get("Binary OOF balanced accuracy", "nan")),
-                "f1": float(metric_dict.get("Binary OOF F1", "nan")),
+                "bal_acc": _to_float(metric_dict.get("Binary OOF balanced accuracy", "nan")),
+                "f1": _to_float(metric_dict.get("Binary OOF F1", "nan")),
                 "weighted_model": metric_dict.get("Weighted regression model", ""),
-                "weighted_r2": float(metric_dict.get("Weighted OOF R²", "nan")),
-                "weighted_mae": float(metric_dict.get("Weighted OOF MAE", "nan")),
-                "walk_yes": int(metric_dict.get("Non-completers predicted to walk", "0")),
-                "walk_no": int(metric_dict.get("Non-completers predicted not to walk", "0")),
-                "feature_count": int(metric_dict.get("Feature count", "0")),
+                "weighted_r2": _to_float(metric_dict.get("Weighted OOF R²", "nan")),
+                "weighted_mae": _to_float(metric_dict.get("Weighted OOF MAE", "nan")),
+                "walk_yes": _to_int(metric_dict.get("Non-completers predicted to walk", "0")),
+                "walk_no": _to_int(metric_dict.get("Non-completers predicted not to walk", "0")),
+                "feature_count": _to_int(metric_dict.get("Feature count", "0")),
                 "top_predictors": predictors[:10],
                 "leaderboard": leaderboard,
                 "balacc_margin_top2": balacc_margin,
@@ -186,16 +201,25 @@ def write_ipcw_doc(models: list[dict]) -> None:
         )
     _add_table(doc, model_rows)
 
-    model_counter = Counter(r["binary_model"] for r in models)
-    avg_bal = mean([r["bal_acc"] for r in models])
-    avg_r2 = mean([r["weighted_r2"] for r in models])
-    best_fit = max(models, key=lambda x: x["weighted_r2"])
-    best_cls = max(models, key=lambda x: x["bal_acc"])
+    model_counter = Counter(r["binary_model"] for r in models if r["binary_model"])
+    finite_bal = [r["bal_acc"] for r in models if math.isfinite(r["bal_acc"])]
+    finite_r2 = [r["weighted_r2"] for r in models if math.isfinite(r["weighted_r2"])]
+    finite_fit_rows = [r for r in models if math.isfinite(r["weighted_r2"])]
+    finite_cls_rows = [r for r in models if math.isfinite(r["bal_acc"])]
+
+    if not finite_bal or not finite_r2 or not finite_fit_rows or not finite_cls_rows:
+        raise RuntimeError("Missing finite IPCW metrics; cannot build summary safely.")
+
+    avg_bal = mean(finite_bal)
+    avg_r2 = mean(finite_r2)
+    best_fit = max(finite_fit_rows, key=lambda x: x["weighted_r2"])
+    best_cls = max(finite_cls_rows, key=lambda x: x["bal_acc"])
+    common_model, common_count = model_counter.most_common(1)[0] if model_counter else ("N/A", 0)
 
     summary = doc.add_paragraph(
         f"Across {len(models)} tier/scenario models, mean binary balanced accuracy was {avg_bal:.3f} and mean "
         f"IPCW-weighted regression R² was {avg_r2:.4f}. Most frequent binary classifier was "
-        f"{model_counter.most_common(1)[0][0]} ({model_counter.most_common(1)[0][1]}/{len(models)} models). "
+        f"{common_model} ({common_count}/{len(models)} models). "
         f"Best weighted fit: {best_fit['tier']} {best_fit['scenario']} (R²={best_fit['weighted_r2']:.4f}); "
         f"best classification discrimination: {best_cls['tier']} {best_cls['scenario']} (Bal Acc={best_cls['bal_acc']:.3f})."
     )
