@@ -7,9 +7,9 @@ Consolidates prior-session model outputs into requested deliverables:
 - 202608310_Appraise_1029.docx
 
 Data/model provenance:
-- Updated LASSO suite: 20260831_LASSO_0802.docx / 20260831_LASSO_0802.py
+- Updated LASSO suite: 20260831_LASSO_1047.docx / 20260831_LASSO_1047.py
 - IPCW extrapolated predicted 6MWT suite: 20260828_5_Tiers_1201.docx / 20260828_5_Tiers_1201.py
-- Most recent patient dataset reference: 20260831_LASSO_0802.xlsx
+- Most recent patient dataset reference: 20260831_LASSO_1047.xlsx
 """
 
 from __future__ import annotations
@@ -23,11 +23,11 @@ from docx.shared import Pt
 
 ROOT = Path(__file__).resolve().parent
 
-LASSO_DOC = ROOT / "20260831_LASSO_0802.docx"
-LASSO_SCRIPT = ROOT / "20260831_LASSO_0802.py"
+LASSO_DOC = ROOT / "20260831_LASSO_1047.docx"
+LASSO_SCRIPT = ROOT / "20260831_LASSO_1047.py"
 IPCW_DOC = ROOT / "20260828_5_Tiers_1201.docx"
 IPCW_SCRIPT = ROOT / "20260828_5_Tiers_1201.py"
-LATEST_DATASET = ROOT / "20260831_LASSO_0802.xlsx"
+LATEST_DATASET = ROOT / "20260831_LASSO_1047.xlsx"
 
 OUT_MODELS = ROOT / "20260831_Models_1029.docx"
 OUT_APPRAISE = ROOT / "202608310_Appraise_1029.docx"
@@ -60,18 +60,55 @@ def _model_idx_from_name(name: str) -> int:
 
 def parse_lasso_metrics() -> list[dict]:
     doc = Document(LASSO_DOC)
-    metrics_tables = [t for i, t in enumerate(doc.tables) if i % 2 == 0]
+    metrics_tables = [
+        t for t in doc.tables
+        if t.rows and t.rows[0].cells[0].text.strip() == "Metric"
+    ]
+    importance_tables = [
+        t for t in doc.tables
+        if t.rows and t.rows[0].cells[0].text.strip() == "Predictor"
+    ]
     results = []
     model_names = [
         p.text.strip() for p in doc.paragraphs if p.text.strip().startswith("Model ")
     ]
 
-    for name, table in zip(model_names, metrics_tables):
+    for name, table, imp_table in zip(model_names, metrics_tables, importance_tables):
         m = {}
         for r in table.rows[1:]:
             key = r.cells[0].text.strip()
             val = r.cells[1].text.strip()
             m[key] = val
+
+        header = [c.text.strip() for c in imp_table.rows[0].cells]
+        imp_rows = []
+        for row in imp_table.rows[1:]:
+            cells = [c.text.strip() for c in row.cells]
+            if not any(cells):
+                continue
+            d = dict(zip(header, cells))
+            imp_rows.append(
+                {
+                    "predictor": d["Predictor"],
+                    "direction": d.get("Direction", ""),
+                    "full_fit_coef": float(d["Full-fit Coef"]),
+                    "boot_mean_coef": float(d["Boot Mean Coef"]),
+                    "boot_sd": float(d["Boot SD"]),
+                    "selection_freq": float(d["Selection Freq"]),
+                    "stable": d.get("Stable", "").lower() == "yes",
+                }
+            )
+
+        top_positive = sorted(
+            [r for r in imp_rows if r["boot_mean_coef"] > 0],
+            key=lambda x: (x["selection_freq"], abs(x["boot_mean_coef"])),
+            reverse=True,
+        )[:5]
+        top_negative = sorted(
+            [r for r in imp_rows if r["boot_mean_coef"] < 0],
+            key=lambda x: (x["selection_freq"], abs(x["boot_mean_coef"])),
+            reverse=True,
+        )[:5]
 
         results.append(
             {
@@ -86,6 +123,10 @@ def parse_lasso_metrics() -> list[dict]:
                 "train_r2": float(m["Train R² (apparent)"]),
                 "train_mae": float(m["Train MAE (apparent)"].replace(" m", "")),
                 "best_alpha": m["Best alpha (full-data fit)"],
+                "r2_gap": float(m["Train R² (apparent)"]) - float(m["CV R² (OOF)"]),
+                "top_positive": top_positive,
+                "top_negative": top_negative,
+                "top_importance": imp_rows[:8],
             }
         )
 
@@ -94,12 +135,24 @@ def parse_lasso_metrics() -> list[dict]:
 
 def parse_ipcw_metrics() -> list[dict]:
     doc = Document(IPCW_DOC)
-    field_tables = [doc.tables[i] for i in range(0, len(doc.tables), 3)]
     rows = []
-    for table in field_tables:
+    for base_idx in range(0, len(doc.tables), 3):
+        if base_idx + 2 >= len(doc.tables):
+            break
+        table = doc.tables[base_idx]
         d = {}
         for r in table.rows[1:]:
             d[r.cells[0].text.strip()] = r.cells[1].text.strip()
+
+        ridge_table = doc.tables[base_idx + 1]
+        top_weighted_predictors = []
+        for row in ridge_table.rows[1:6]:
+            top_weighted_predictors.append(
+                {
+                    "predictor": row.cells[0].text.strip(),
+                    "abs_coef": float(row.cells[1].text.strip()),
+                }
+            )
 
         rows.append(
             {
@@ -113,6 +166,7 @@ def parse_ipcw_metrics() -> list[dict]:
                 "walk_yes": int(d["Non-completers predicted to walk"]),
                 "walk_no": int(d["Non-completers predicted not to walk"]),
                 "feature_count": int(d["Feature count"]),
+                "top_weighted_predictors": top_weighted_predictors,
             }
         )
     return rows
@@ -121,11 +175,12 @@ def parse_ipcw_metrics() -> list[dict]:
 def write_models_doc(lasso: list[dict], ipcw: list[dict]) -> None:
     doc = Document()
     t = doc.add_paragraph()
-    t.add_run("20260831 Consolidated Model Results (Session 1029)").bold = True
+    t.add_run("20260831 Consolidated Model Results with Detailed Explainers (Session 1029)").bold = True
 
     p = doc.add_paragraph(
-        "This document consolidates prior-session outputs for updated LASSO 6MWT4 models "
-        "(with explainers) and IPCW extrapolated predicted 6MWT workflows. "
+        "This document consolidates refreshed six-model LASSO 6MWT4 outputs and IPCW extrapolated "
+        "predicted 6MWT workflows. It adds detailed explainers and feature-importance summaries so "
+        "the ranking of each workflow can be interpreted clinically rather than only compared numerically. "
         f"Most recent patient dataset reference: {LATEST_DATASET.name}."
     )
     _small(p)
@@ -147,17 +202,77 @@ def write_models_doc(lasso: list[dict], ipcw: list[dict]) -> None:
         )
     _add_table(doc, rows)
 
+    lasso_by_idx = {row["model_idx"]: row for row in lasso}
+    model2 = lasso_by_idx.get(2)
+    model3 = lasso_by_idx.get(3)
+    model4 = lasso_by_idx.get(4)
+    model6 = lasso_by_idx.get(6)
     doc.add_paragraph("Explainer summary:")
-    bullets = [
-        "Model 2 (CPANM-GS) achieved the highest cross-validated explanatory power (CV R²=0.5154).",
-        "Model 3 (CPANM-NGS) retained strong performance (CV R²=0.5041) without gait-speed imputation.",
-        "Model 2 vs Model 3 indicates a modest incremental gain from imputed gait speed (ΔR²=+0.0113).",
-        "Model 6 (neurological/comorbidity-only reference) underperformed (CV R²=0.2442), supporting functional T1 dominance.",
-        "Bedside model (Model 4) remained compact (4 predictors) with competitive CV R²=0.4836.",
-    ]
+    bullets = []
+    if model2:
+        bullets.append(
+            f"Model 2 achieved the highest cross-validated fit (CV R²={model2['cv_r2']:.4f}) while preserving {model2['stable']} stable predictors."
+        )
+    if model3:
+        bullets.append(
+            f"Model 3 remained close behind without gait-speed imputation (CV R²={model3['cv_r2']:.4f}), so gait speed adds value but is not the sole driver of performance."
+        )
+    if model4:
+        bullets.append(
+            f"Model 4 stayed the most deployable bedside model with only {model4['input_vars']} predictors and CV R²={model4['cv_r2']:.4f}."
+        )
+    if model6:
+        bullets.append(
+            f"Model 6 was the weakest reference model (CV R²={model6['cv_r2']:.4f}), highlighting the importance of functional T1 information."
+        )
+    bullets.append(
+        "Across the leading LASSO models, balance, age, gait speed, and sex consistently remained among the most stable signals."
+    )
     for b in bullets:
         q = doc.add_paragraph(f"• {b}")
         _small(q)
+
+    for r in lasso:
+        doc.add_paragraph()
+        model_heading = doc.add_paragraph()
+        model_heading.add_run(r["model"]).bold = True
+
+        explainer = doc.add_paragraph(
+            f"This model used {r['input_vars']} candidate predictors and ranked with CV R² {r['cv_r2']:.4f}, "
+            f"CV MAE {r['cv_mae']:.2f} m, and an apparent-minus-OOF R² gap of {r['r2_gap']:.4f}. "
+            f"It retained {r['stable']} stable predictors out of {r['nonzero']} non-zero full-fit coefficients."
+        )
+        _small(explainer)
+
+        pos = ", ".join(
+            f"{x['predictor']} ({x['boot_mean_coef']:+.1f}; freq {x['selection_freq']:.0%})"
+            for x in r["top_positive"]
+        ) or "none"
+        neg = ", ".join(
+            f"{x['predictor']} ({x['boot_mean_coef']:+.1f}; freq {x['selection_freq']:.0%})"
+            for x in r["top_negative"]
+        ) or "none"
+        pos_para = doc.add_paragraph(f"Top positive contributors: {pos}.")
+        _small(pos_para, 8)
+        neg_para = doc.add_paragraph(f"Top negative contributors: {neg}.")
+        _small(neg_para, 8)
+
+        detail_rows = [[
+            "Predictor",
+            "Direction",
+            "Boot mean coef",
+            "Selection freq",
+            "Stable",
+        ]]
+        for x in r["top_importance"]:
+            detail_rows.append([
+                x["predictor"],
+                x["direction"],
+                f"{x['boot_mean_coef']:.4f}",
+                f"{x['selection_freq']:.3f}",
+                "Yes" if x["stable"] else "No",
+            ])
+        _add_table(doc, detail_rows)
 
     doc.add_paragraph()
     h2 = doc.add_paragraph()
@@ -184,8 +299,27 @@ def write_models_doc(lasso: list[dict], ipcw: list[dict]) -> None:
     )
     _small(p2)
 
+    ipcw_rows = [[
+        "Tier/Scenario",
+        "Top weighted Ridge predictors",
+    ]]
+    for r in ipcw:
+        predictors = ", ".join(
+            f"{x['predictor']} ({x['abs_coef']:.1f})"
+            for x in r["top_weighted_predictors"]
+        )
+        ipcw_rows.append([f"{r['tier']} {r['scenario']}", predictors])
+    _add_table(doc, ipcw_rows)
+
+    ipcw_explainer = doc.add_paragraph(
+        "Feature-importance pattern: gait speed, sex, baseline disability, and quality-of-life measures repeatedly "
+        "appear among the largest weighted Ridge coefficients in the IPCW runs, which aligns with the LASSO findings "
+        "that early functional status dominates later walking-capacity prediction."
+    )
+    _small(ipcw_explainer)
+
     src = doc.add_paragraph(
-        "Source artifacts: 20260831_LASSO_0802.docx/.py/.xlsx and 20260828_5_Tiers_1201.docx/.py/.xlsx"
+        "Source artifacts: 20260831_LASSO_1047.docx/.py/.xlsx and 20260828_5_Tiers_1201.docx/.py/.xlsx"
     )
     _small(src, 8)
 
@@ -208,6 +342,7 @@ def write_appraisal_doc(lasso: list[dict], ipcw: list[dict]) -> None:
         f"Data context: appraised from prior-session artifacts on the latest patient dataset lineage anchored by {LATEST_DATASET.name}.",
         f"Overall discrimination/fit: updated LASSO models show moderate-to-strong cross-validated fit (mean CV R²={avg_lasso_r2:.4f}), with best performance in {best_lasso['model']} (CV R²={best_lasso['cv_r2']:.4f}).",
         f"Model dependence on functional variables: the weakest model is {worst_lasso['model']} (CV R²={worst_lasso['cv_r2']:.4f}), reinforcing that neurological/comorbidity predictors alone are insufficient for accurate 6MWT4 prediction.",
+        "Feature-importance consistency: BBS1, age, gait speed, and sex remain recurrent high-stability drivers across the stronger LASSO specifications, supporting their role as the main explanatory anchors.",
         "Clinical interpretability: the small ΔR² between CPANM-GS and CPANM-NGS suggests gait-speed imputation contributes incremental but non-dominant information; this supports feasible deployment where formal gait-speed testing is unavailable.",
         f"IPCW workflow performance: binary walking classification is consistently acceptable-to-good (mean balanced accuracy={avg_bal:.3f}); IPCW-weighted continuous prediction is stable (mean weighted R²={avg_ipcw_r2:.4f}) across tiers and scenarios.",
         "Bias control strengths: stabilized IPCW plus winsorization and scenario-based extrapolation provide a transparent mechanism to address non-random completion and preserve patient-level outputs for non-completers.",
