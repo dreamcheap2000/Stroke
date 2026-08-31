@@ -283,7 +283,7 @@ def write_ipcw_doc(models: list[dict]) -> None:
 
 def main() -> None:
     if not SOURCE_DOC.exists():
-        raise FileNotFoundError(f"Missing required source document: {SOURCE_DOC.name}")
+        raise FileNotFoundError(f"Missing required source document: {SOURCE_DOC}")
     if not SOURCE_SCRIPT.exists():
         print(f"Warning: source script not found ({SOURCE_SCRIPT.name}); proceeding with DOCX-only provenance.")
 
