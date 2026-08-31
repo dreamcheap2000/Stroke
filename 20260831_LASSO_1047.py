@@ -302,6 +302,19 @@ def _executive_bullets(results: list[dict]) -> list[str]:
     ]
 
 
+def _can_reuse_cached_artifacts() -> bool:
+    """Return True when the prior six-model artifacts are present and not older than the input data."""
+    if not INPUT_XLSX.exists():
+        return False
+    if not SOURCE_DOCX.exists() or not SOURCE_XLSX.exists():
+        return False
+    input_mtime = INPUT_XLSX.stat().st_mtime
+    return (
+        SOURCE_DOCX.stat().st_mtime >= input_mtime
+        and SOURCE_XLSX.stat().st_mtime >= input_mtime
+    )
+
+
 def _parse_alpha_summary(text: str) -> tuple[float, float, float]:
     """Parse 'median [q25, q75]' alpha text from an existing report table."""
     numbers = [float(x) for x in re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", text)]
@@ -639,6 +652,11 @@ def write_docx_report(results: list[dict]) -> None:
 
 def write_excel_predictions(df: pd.DataFrame, results: list[dict]) -> None:
     """Write Excel with original data plus one prediction column per model."""
+    if any(r["base_pipe"] is None for r in results):
+        raise ValueError(
+            "Cannot regenerate prediction columns from cached summary-only results without fitted pipelines."
+        )
+
     out = df.copy()
 
     for r in results:
@@ -658,6 +676,8 @@ def write_excel_predictions(df: pd.DataFrame, results: list[dict]) -> None:
 
 def run_analysis(write_outputs: bool = True) -> tuple[pd.DataFrame, list[dict]]:
     """Run the six-model LASSO analysis and optionally write refreshed outputs."""
+    if not INPUT_XLSX.exists():
+        raise FileNotFoundError(f"Missing required input dataset: {INPUT_XLSX.name}")
     print(f"Loading: {INPUT_XLSX.name}")
     df = pd.read_excel(INPUT_XLSX)
     print(f"Dataset: {df.shape[0]:,} rows × {df.shape[1]} columns")
@@ -669,7 +689,8 @@ def run_analysis(write_outputs: bool = True) -> tuple[pd.DataFrame, list[dict]]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    if SOURCE_DOCX.exists() and SOURCE_XLSX.exists():
+    cached_results_used = _can_reuse_cached_artifacts()
+    if cached_results_used:
         print(f"Using cached six-model artifacts: {SOURCE_DOCX.name}, {SOURCE_XLSX.name}")
         results = load_existing_results(df)
     else:
@@ -705,7 +726,7 @@ def run_analysis(write_outputs: bool = True) -> tuple[pd.DataFrame, list[dict]]:
     if write_outputs:
         print("\n" + "=" * 78)
         write_docx_report(results)
-        if SOURCE_XLSX.exists():
+        if cached_results_used:
             shutil.copy2(SOURCE_XLSX, OUTPUT_XLSX)
             print(f"Saved: {OUTPUT_XLSX.name}")
         else:

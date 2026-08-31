@@ -99,8 +99,16 @@ def parse_lasso_metrics() -> list[dict]:
                 }
             )
 
-        top_positive = [r for r in imp_rows if r["boot_mean_coef"] > 0][:5]
-        top_negative = [r for r in imp_rows if r["boot_mean_coef"] < 0][:5]
+        top_positive = sorted(
+            [r for r in imp_rows if r["boot_mean_coef"] > 0],
+            key=lambda x: (x["selection_freq"], abs(x["boot_mean_coef"])),
+            reverse=True,
+        )[:5]
+        top_negative = sorted(
+            [r for r in imp_rows if r["boot_mean_coef"] < 0],
+            key=lambda x: (x["selection_freq"], abs(x["boot_mean_coef"])),
+            reverse=True,
+        )[:5]
 
         results.append(
             {
@@ -127,14 +135,16 @@ def parse_lasso_metrics() -> list[dict]:
 
 def parse_ipcw_metrics() -> list[dict]:
     doc = Document(IPCW_DOC)
-    field_tables = [doc.tables[i] for i in range(0, len(doc.tables), 3)]
     rows = []
-    for idx, table in enumerate(field_tables):
+    for base_idx in range(0, len(doc.tables), 3):
+        if base_idx + 2 >= len(doc.tables):
+            break
+        table = doc.tables[base_idx]
         d = {}
         for r in table.rows[1:]:
             d[r.cells[0].text.strip()] = r.cells[1].text.strip()
 
-        ridge_table = doc.tables[idx * 3 + 1]
+        ridge_table = doc.tables[base_idx + 1]
         top_weighted_predictors = []
         for row in ridge_table.rows[1:6]:
             top_weighted_predictors.append(
@@ -192,14 +202,32 @@ def write_models_doc(lasso: list[dict], ipcw: list[dict]) -> None:
         )
     _add_table(doc, rows)
 
+    lasso_by_idx = {row["model_idx"]: row for row in lasso}
+    model2 = lasso_by_idx.get(2)
+    model3 = lasso_by_idx.get(3)
+    model4 = lasso_by_idx.get(4)
+    model6 = lasso_by_idx.get(6)
     doc.add_paragraph("Explainer summary:")
-    bullets = [
-        f"Model 2 achieved the highest cross-validated fit (CV R²={lasso[1]['cv_r2']:.4f}) while preserving 27 stable predictors.",
-        f"Model 3 remained close behind without gait-speed imputation (CV R²={lasso[2]['cv_r2']:.4f}), so gait speed adds value but is not the sole driver of performance.",
-        f"Model 4 stayed the most deployable bedside model with only {lasso[3]['input_vars']} predictors and CV R²={lasso[3]['cv_r2']:.4f}.",
-        f"Model 6 was the weakest reference model (CV R²={lasso[5]['cv_r2']:.4f}), highlighting the importance of functional T1 information.",
-        "Across the leading LASSO models, balance, age, gait speed, and sex consistently remained among the most stable signals.",
-    ]
+    bullets = []
+    if model2:
+        bullets.append(
+            f"Model 2 achieved the highest cross-validated fit (CV R²={model2['cv_r2']:.4f}) while preserving {model2['stable']} stable predictors."
+        )
+    if model3:
+        bullets.append(
+            f"Model 3 remained close behind without gait-speed imputation (CV R²={model3['cv_r2']:.4f}), so gait speed adds value but is not the sole driver of performance."
+        )
+    if model4:
+        bullets.append(
+            f"Model 4 stayed the most deployable bedside model with only {model4['input_vars']} predictors and CV R²={model4['cv_r2']:.4f}."
+        )
+    if model6:
+        bullets.append(
+            f"Model 6 was the weakest reference model (CV R²={model6['cv_r2']:.4f}), highlighting the importance of functional T1 information."
+        )
+    bullets.append(
+        "Across the leading LASSO models, balance, age, gait speed, and sex consistently remained among the most stable signals."
+    )
     for b in bullets:
         q = doc.add_paragraph(f"• {b}")
         _small(q)
