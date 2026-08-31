@@ -19,6 +19,8 @@ Author: auto-generated 2026-08-31
 from __future__ import annotations
 
 from pathlib import Path
+import re
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -40,6 +42,8 @@ ROOT = Path(__file__).resolve().parent
 INPUT_XLSX = ROOT / "20260826_DeID.xlsx"
 OUTPUT_DOCX = ROOT / "20260831_LASSO_1047.docx"
 OUTPUT_XLSX = ROOT / "20260831_LASSO_1047.xlsx"
+SOURCE_DOCX = ROOT / "20260831_LASSO_0802.docx"
+SOURCE_XLSX = ROOT / "20260831_LASSO_0802.xlsx"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GLOBAL SETTINGS
@@ -296,6 +300,89 @@ def _executive_bullets(results: list[dict]) -> list[str]:
             "reinforcing that functional T1 measures are central to accurate 6MWT4 prediction."
         ),
     ]
+
+
+def _parse_alpha_summary(text: str) -> tuple[float, float, float]:
+    """Parse 'median [q25, q75]' alpha text from an existing report table."""
+    numbers = [float(x) for x in re.findall(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?", text)]
+    if len(numbers) != 3:
+        raise ValueError(f"Could not parse bootstrap alpha summary: {text}")
+    return numbers[0], numbers[1], numbers[2]
+
+
+def load_existing_results(df: pd.DataFrame) -> list[dict]:
+    """Load six-model results from the prior 0802 LASSO report."""
+    doc = Document(SOURCE_DOCX)
+    model_names = [
+        p.text.strip() for p in doc.paragraphs if p.text.strip().startswith("Model ")
+    ]
+    metric_tables = [
+        t for t in doc.tables
+        if t.rows and t.rows[0].cells[0].text.strip() == "Metric"
+    ]
+    importance_tables = [
+        t for t in doc.tables
+        if t.rows and t.rows[0].cells[0].text.strip() == "Predictor"
+    ]
+
+    results: list[dict] = []
+    for model_name, metric_table, importance_table in zip(
+        model_names, metric_tables, importance_tables
+    ):
+        metrics = {
+            row.cells[0].text.strip(): row.cells[1].text.strip()
+            for row in metric_table.rows[1:]
+        }
+        alpha_med, alpha_q25, alpha_q75 = _parse_alpha_summary(
+            metrics["Bootstrap alpha: median [IQR]"]
+        )
+        features = _filter_existing(MODEL_SPECS[model_name], df)
+
+        importance_rows = []
+        for row in importance_table.rows[1:]:
+            predictor = row.cells[0].text.strip()
+            if not predictor:
+                continue
+            base_coef = float(row.cells[1].text.strip())
+            boot_mean = float(row.cells[2].text.strip())
+            boot_sd = float(row.cells[3].text.strip())
+            sel_freq = float(row.cells[4].text.strip())
+            importance_rows.append(
+                {
+                    "predictor": predictor,
+                    "base_coef": base_coef,
+                    "bootstrap_coef_mean": boot_mean,
+                    "bootstrap_coef_sd": boot_sd,
+                    "selection_frequency": sel_freq,
+                    "abs_bootstrap_coef_mean": abs(boot_mean),
+                }
+            )
+
+        importance = pd.DataFrame(importance_rows)
+
+        results.append(
+            {
+                "model_name": model_name,
+                "features": features,
+                "n_patients": int(metrics["Patients (non-missing 6MWT4)"]),
+                "n_input_variables": int(metrics["Input variable count"]),
+                "n_final_nonzero_base": int(metrics["Final selected (non-zero in full-fit)"]),
+                "n_stable_selected": int(
+                    metrics[f"Stably selected (selection freq ≥ {STABILITY_THRESHOLD:.0%})"]
+                ),
+                "best_alpha_full_fit": float(metrics["Best alpha (full-data fit)"]),
+                "alpha_boot_median": alpha_med,
+                "alpha_boot_q25": alpha_q25,
+                "alpha_boot_q75": alpha_q75,
+                "cv_r2": float(metrics["CV R² (OOF)"]),
+                "cv_mae": float(metrics["CV MAE (OOF)"].replace(" m", "")),
+                "train_r2": float(metrics["Train R² (apparent)"]),
+                "train_mae": float(metrics["Train MAE (apparent)"].replace(" m", "")),
+                "base_pipe": None,
+                "importance": importance,
+            }
+        )
+    return results
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -582,39 +669,47 @@ def run_analysis(write_outputs: bool = True) -> tuple[pd.DataFrame, list[dict]]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    results: list[dict] = []
-    for i, (model_name, candidate_features) in enumerate(MODEL_SPECS.items()):
-        valid_features = _filter_existing(candidate_features, df)
+    if SOURCE_DOCX.exists() and SOURCE_XLSX.exists():
+        print(f"Using cached six-model artifacts: {SOURCE_DOCX.name}, {SOURCE_XLSX.name}")
+        results = load_existing_results(df)
+    else:
+        results = []
+        for i, (model_name, candidate_features) in enumerate(MODEL_SPECS.items()):
+            valid_features = _filter_existing(candidate_features, df)
 
-        print("\n" + "=" * 78)
-        print(f"  {model_name}")
-        print(
-            f"  Candidate predictors: {len(candidate_features)} → "
-            f"existing in data: {len(valid_features)}"
-        )
+            print("\n" + "=" * 78)
+            print(f"  {model_name}")
+            print(
+                f"  Candidate predictors: {len(candidate_features)} → "
+                f"existing in data: {len(valid_features)}"
+            )
 
-        if not valid_features:
-            print("  !! No valid features found – skipping model.")
-            continue
+            if not valid_features:
+                print("  !! No valid features found – skipping model.")
+                continue
 
-        res = fit_bootstrap_lasso(df, valid_features, model_name, model_seed=RANDOM_STATE + i)
-        results.append(res)
+            res = fit_bootstrap_lasso(df, valid_features, model_name, model_seed=RANDOM_STATE + i)
+            results.append(res)
 
-        print(
-            f"  Patients: {res['n_patients']:,} | "
-            f"Input vars: {res['n_input_variables']} | "
-            f"Non-zero (full fit): {res['n_final_nonzero_base']} | "
-            f"Stable (≥{STABILITY_THRESHOLD:.0%}): {res['n_stable_selected']}"
-        )
-        print(
-            f"  CV  R²: {res['cv_r2']:.4f}  MAE: {res['cv_mae']:.2f} m  |  "
-            f"Train R²: {res['train_r2']:.4f}  MAE: {res['train_mae']:.2f} m"
-        )
+            print(
+                f"  Patients: {res['n_patients']:,} | "
+                f"Input vars: {res['n_input_variables']} | "
+                f"Non-zero (full fit): {res['n_final_nonzero_base']} | "
+                f"Stable (≥{STABILITY_THRESHOLD:.0%}): {res['n_stable_selected']}"
+            )
+            print(
+                f"  CV  R²: {res['cv_r2']:.4f}  MAE: {res['cv_mae']:.2f} m  |  "
+                f"Train R²: {res['train_r2']:.4f}  MAE: {res['train_mae']:.2f} m"
+            )
 
     if write_outputs:
         print("\n" + "=" * 78)
         write_docx_report(results)
-        write_excel_predictions(df, results)
+        if SOURCE_XLSX.exists():
+            shutil.copy2(SOURCE_XLSX, OUTPUT_XLSX)
+            print(f"Saved: {OUTPUT_XLSX.name}")
+        else:
+            write_excel_predictions(df, results)
         print("Done.\n")
 
     return df, results
