@@ -286,9 +286,10 @@ def compute_ipcw_weights(
     raw_weights = np.where(y == 1, p_numer / p_denom, np.nan)
     completer_weights = raw_weights[~np.isnan(raw_weights)]
 
-    # Sensitivity to winsorization threshold
+    # Sensitivity to winsorization threshold (always computed from raw pre-winsorization weights)
     sensitivity: dict[int, dict] = {}
-    for pct in WINSORIZATION_THRESHOLDS:
+    all_threshold_pcts = sorted(set(WINSORIZATION_THRESHOLDS) | {winsor_pct})
+    for pct in all_threshold_pcts:
         lo, hi = np.nanpercentile(completer_weights, [100 - pct, pct])
         w_clipped = np.clip(completer_weights, lo, hi)
         pct_truncated = float(np.mean((completer_weights < lo) | (completer_weights > hi)))
@@ -314,6 +315,9 @@ def compute_ipcw_weights(
     weights_series = pd.Series(np.nan, index=df.index, dtype="float64")
     weights_series.loc[X_imp.index] = winsorized
 
+    raw_weights_series = pd.Series(np.nan, index=df.index, dtype="float64")
+    raw_weights_series.loc[X_imp.index] = raw_weights
+
     wt = winsorized[~np.isnan(winsorized)]
     weight_diag = {
         "mean": float(np.mean(wt)),
@@ -326,6 +330,8 @@ def compute_ipcw_weights(
 
     return {
         "weights": weights_series,
+        "raw_weights_series": raw_weights_series,  # pre-winsorization, for sensitivity in Ridge
+        "raw_completer_weights": completer_weights,  # pre-winsorization, for sensitivity in Ridge
         "imputer": imputer,
         "features": valid,
         "denominator_model": "LogisticRegression(solver='lbfgs', C=1.0) on tier features",
@@ -427,12 +433,13 @@ def fit_weighted_ridge(
     r2 = float(r2_score(y, oof, sample_weight=weights))
     mae = _weighted_mae(y, oof, weights)
 
-    # Sensitivity: re-compute metrics at different winsor thresholds
+    # Sensitivity: re-compute metrics at different winsor thresholds using
+    # raw (pre-winsorization) weights so thresholds are truly independent.
     sensitivity_r2: dict[int, float] = {}
     sensitivity_mae: dict[int, float] = {}
-    raw_w = ipcw["weights"].loc[completer_mask].fillna(1.0).to_numpy()
+    raw_w = ipcw["raw_weights_series"].loc[completer_mask].fillna(1.0).to_numpy()
     for pct in WINSORIZATION_THRESHOLDS:
-        lo, hi = np.percentile(raw_w, [100 - pct, pct])
+        lo, hi = np.percentile(raw_w[np.isfinite(raw_w)], [100 - pct, pct])
         w_alt = np.clip(raw_w, lo, hi)
         oof_alt = np.zeros(len(df_comp), dtype="float64")
         for tr, te in cv_splits:
@@ -864,15 +871,11 @@ def main() -> None:
                               n_bootstrap=N_BOOTSTRAP, numerator_mode=NUMERATOR_MODE)
             print(f"R² CI=[{ci['r2_ci_lo']:.4f}, {ci['r2_ci_hi']:.4f}]")
 
-            # Write prediction columns
+            # Write prediction columns (patient-level, non-completers only)
             walk_col = f"IPCW_Walk_{_tier_token(tier_name)}_{scenario_label}"
             pred_col = f"IPCW_6MWT4_{_tier_token(tier_name)}_{scenario_label}"
-            ci_lo_col = f"IPCW_6MWT4_{_tier_token(tier_name)}_{scenario_label}_R2_CI_lo"
-            ci_hi_col = f"IPCW_6MWT4_{_tier_token(tier_name)}_{scenario_label}_R2_CI_hi"
             output_df[walk_col] = pd.Series(pd.NA, index=output_df.index, dtype="Int64")
             output_df[pred_col] = np.nan
-            output_df[ci_lo_col] = ci["r2_ci_lo"]
-            output_df[ci_hi_col] = ci["r2_ci_hi"]
             nc_idx = regression_result["noncomp_index"]
             output_df.loc[nc_idx, walk_col] = regression_result["noncomp_walk_pred"]
             output_df.loc[nc_idx, pred_col] = regression_result["noncomp_6mwt4_pred"]
@@ -888,7 +891,34 @@ def main() -> None:
                 "bootstrap_ci": ci,
             })
 
-    output_df.to_excel(OUTPUT_XLSX, index=False)
+    # Build model-level summary (bootstrap CIs are model statistics, not patient-level)
+    summary_rows = []
+    for r in all_results:
+        ci_s = r["bootstrap_ci"]
+        reg = r["regression"]
+        summary_rows.append({
+            "Tier": r["tier"],
+            "Scenario": r["scenario_label"],
+            "Numerator_mode": NUMERATOR_MODE,
+            "Binary_model": r["binary"]["best_model_name"],
+            "Binary_OOF_Bal_Acc": round(r["binary"]["bal_acc"], 3),
+            "Weighted_OOF_R2": round(reg["weighted_r2"], 4),
+            "Weighted_OOF_MAE": round(reg["weighted_mae"], 1),
+            "Boot_R2_mean": round(ci_s["r2_boot_mean"], 4),
+            "Boot_R2_CI_lo": round(ci_s["r2_ci_lo"], 4),
+            "Boot_R2_CI_hi": round(ci_s["r2_ci_hi"], 4),
+            "Boot_MAE_mean": round(ci_s["mae_boot_mean"], 1),
+            "Boot_MAE_CI_lo": round(ci_s["mae_ci_lo"], 1),
+            "Boot_MAE_CI_hi": round(ci_s["mae_ci_hi"], 1),
+            "Boot_valid_resamples": ci_s["n_valid_r2"],
+            "N_noncomp_pred_walk": reg["n_noncomp_pred_walk"],
+            "N_noncomp_pred_no_walk": reg["n_noncomp_pred_no_walk"],
+        })
+    summary_df = pd.DataFrame(summary_rows)
+
+    with pd.ExcelWriter(OUTPUT_XLSX, engine="openpyxl") as writer:
+        output_df.to_excel(writer, sheet_name="Predictions", index=False)
+        summary_df.to_excel(writer, sheet_name="Model_Summary", index=False)
     print(f"\nSaved dataset: {OUTPUT_XLSX.name}")
 
     write_report(all_results)
