@@ -57,6 +57,20 @@ def _field_table_to_dict(table) -> dict[str, str]:
     return out
 
 
+def _to_float(value: str) -> float:
+    try:
+        return float(value)
+    except ValueError:
+        return float("nan")
+
+
+def _to_int(value: str, default: int = 0) -> int:
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
 def parse_latest_ipcw_models() -> list[dict]:
     source = Document(SOURCE_DOC)
     parsed: list[dict] = []
@@ -120,18 +134,6 @@ def parse_latest_ipcw_models() -> list[dict]:
             if len(leaderboard) >= 2
             else 0.0
         )
-
-        def _to_float(value: str) -> float:
-            try:
-                return float(value)
-            except ValueError:
-                return float("nan")
-
-        def _to_int(value: str, default: int = 0) -> int:
-            try:
-                return int(value)
-            except ValueError:
-                return default
 
         parsed.append(
             {
@@ -207,8 +209,17 @@ def write_ipcw_doc(models: list[dict]) -> None:
     finite_fit_rows = [r for r in models if math.isfinite(r["weighted_r2"])]
     finite_cls_rows = [r for r in models if math.isfinite(r["bal_acc"])]
 
-    if not finite_bal or not finite_r2 or not finite_fit_rows or not finite_cls_rows:
-        raise RuntimeError("Missing finite IPCW metrics; cannot build summary safely.")
+    missing = []
+    if not finite_bal:
+        missing.append("balanced_accuracy")
+    if not finite_r2:
+        missing.append("weighted_r2")
+    if not finite_fit_rows:
+        missing.append("best_fit_rows")
+    if not finite_cls_rows:
+        missing.append("best_classification_rows")
+    if missing:
+        raise RuntimeError(f"Missing finite IPCW metrics for summary: {', '.join(missing)}")
 
     avg_bal = mean(finite_bal)
     avg_r2 = mean(finite_r2)
