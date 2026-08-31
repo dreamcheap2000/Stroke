@@ -71,6 +71,10 @@ def _to_int(value: str, default: int = 0) -> int:
         return default
 
 
+def _fmt_float(value: float, digits: int) -> str:
+    return f"{value:.{digits}f}" if math.isfinite(value) else "N/A"
+
+
 def parse_latest_ipcw_models() -> list[dict]:
     source = Document(SOURCE_DOC)
     parsed: list[dict] = []
@@ -194,10 +198,10 @@ def write_ipcw_doc(models: list[dict]) -> None:
                 row["tier"],
                 row["scenario"],
                 row["binary_model"],
-                f"{row['bal_acc']:.3f}",
-                f"{row['f1']:.3f}",
-                f"{row['weighted_r2']:.4f}",
-                f"{row['weighted_mae']:.1f}",
+                _fmt_float(row["bal_acc"], 3),
+                _fmt_float(row["f1"], 3),
+                _fmt_float(row["weighted_r2"], 4),
+                _fmt_float(row["weighted_mae"], 1),
                 f"{row['walk_yes']}/{row['walk_no']}",
             ]
         )
@@ -245,9 +249,9 @@ def write_ipcw_doc(models: list[dict]) -> None:
             f"{x['predictor']} ({x['abs_coef']:.2f})" for x in row["top_predictors"][:5]
         ) or "No predictor table available"
         p = doc.add_paragraph(
-            f"• {row['tier']} {row['scenario']}: {row['binary_model']} reached Bal Acc {row['bal_acc']:.3f} "
-            f"(top-2 margin {row['balacc_margin_top2']:.3f}); weighted model {row['weighted_model']} achieved R² "
-            f"{row['weighted_r2']:.4f} and MAE {row['weighted_mae']:.1f}. Predicted non-completers walking: "
+            f"• {row['tier']} {row['scenario']}: {row['binary_model']} reached Bal Acc {_fmt_float(row['bal_acc'], 3)} "
+            f"(top-2 margin {_fmt_float(row['balacc_margin_top2'], 3)}); weighted model {row['weighted_model']} achieved R² "
+            f"{_fmt_float(row['weighted_r2'], 4)} and MAE {_fmt_float(row['weighted_mae'], 1)}. Predicted non-completers walking: "
             f"{row['walk_yes']} vs not walking: {row['walk_no']}. Top weighted predictors: {top_features}."
         )
         _small(p)
@@ -281,7 +285,7 @@ def main() -> None:
     if not SOURCE_DOC.exists():
         raise FileNotFoundError(f"Missing required source document: {SOURCE_DOC.name}")
     if not SOURCE_SCRIPT.exists():
-        raise FileNotFoundError(f"Missing required source script: {SOURCE_SCRIPT.name}")
+        print(f"Warning: source script not found ({SOURCE_SCRIPT.name}); proceeding with DOCX-only provenance.")
 
     rows = parse_latest_ipcw_models()
     if not rows:
