@@ -493,6 +493,7 @@ def audit_and_clean_t1t2_data(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     summary_rows: list[dict] = []
     flagged_rows: list[dict] = []
     illogical_rows: list[dict] = []
+    raw_outlier_rows: list[dict] = []
 
     for spec in FUNCTIONAL_AUDIT_SPECS:
         cols = [spec["t1"], spec["t2"], spec["t3"], spec["t4"], spec["change"]]
@@ -515,8 +516,39 @@ def audit_and_clean_t1t2_data(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         change_out_of_range = valid_change & (
             (change < -value_span) | (change > value_span)
         )
-
         clear_zero_t2 = zero_t2 & valid_change if spec["auto_clear_zero_t2"] else pd.Series(False, index=cleaned.index)
+
+        for visit_col, visit_values in [
+            (spec["t1"], t1),
+            (spec["t2"], t2),
+            (spec["t3"], t3),
+            (spec["t4"], t4),
+        ]:
+            below_min = visit_values < spec["valid_min"]
+            if visit_col != spec["t1"]:
+                below_min &= ~visit_values.eq(0)
+            raw_outlier_mask = visit_values.notna() & (
+                below_min | (visit_values > spec["valid_max"])
+            )
+            if visit_col == spec["t2"]:
+                raw_outlier_mask &= ~clear_zero_t2
+            if raw_outlier_mask.any():
+                flagged = pd.DataFrame({
+                    "ID": cleaned.get("ID"),
+                    "Assessment": spec["name"],
+                    "Visit_Column": visit_col,
+                    "Observed_Value": visit_values,
+                    "Allowed_Range": f"[{spec['valid_min']}, {spec['valid_max']}]",
+                    "Affects_T1T2_Change_Cleanup": np.where(
+                        visit_col == spec["t2"],
+                        "Yes",
+                        "No",
+                    ),
+                    "Rehab_LOS_Category": cleaned.get("Rehab_LOS_Category"),
+                    "PAC_Program_Completion": cleaned.get("PAC_Program_Completion"),
+                }).loc[raw_outlier_mask]
+                raw_outlier_rows.extend(flagged.to_dict("records"))
+
         clear_out_of_range = valid_change & (t2_out_of_range | change_out_of_range) & ~clear_zero_t2
         clear_mask = clear_zero_t2 | clear_out_of_range
 
@@ -602,6 +634,7 @@ def audit_and_clean_t1t2_data(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
         "summary_df": pd.DataFrame(summary_rows),
         "flagged_cases_df": pd.DataFrame(flagged_rows),
         "illogical_values_df": pd.DataFrame(illogical_rows),
+        "raw_outliers_df": pd.DataFrame(raw_outlier_rows),
         "bi_cases_df": bi_cases_df if not isinstance(bi_cases_df, list) else pd.DataFrame(),
     }
     return cleaned, audit
@@ -1209,6 +1242,7 @@ def write_combined_report(
     audit_summary = audit_info["summary_df"]
     bi_cases = audit_info["bi_cases_df"]
     illogical_values = audit_info["illogical_values_df"]
+    raw_outliers = audit_info["raw_outliers_df"]
 
     bi_row = (
         audit_summary.loc[audit_summary["Assessment"].eq("BI")].iloc[0]
@@ -1260,6 +1294,24 @@ def write_combined_report(
                 _fmt(row["Original_Change"], 1),
             ])
         _add_table_to_doc(doc, illogical_rows)
+
+    if not raw_outliers.empty:
+        doc.add_paragraph()
+        raw_heading = doc.add_paragraph()
+        raw_heading.add_run("Other functional raw-score outliers found during audit").bold = True
+        raw_rows = [[
+            "ID", "Assessment", "Visit column", "Observed value", "Allowed range", "Affects T1T2 cleanup",
+        ]]
+        for _, row in raw_outliers.iterrows():
+            raw_rows.append([
+                int(row["ID"]) if pd.notna(row["ID"]) else "",
+                row["Assessment"],
+                row["Visit_Column"],
+                _fmt(row["Observed_Value"], 1),
+                row["Allowed_Range"],
+                row["Affects_T1T2_Change_Cleanup"],
+            ])
+        _add_table_to_doc(doc, raw_rows)
 
     if not bi_cases.empty:
         doc.add_paragraph()
@@ -1839,6 +1891,7 @@ def main() -> None:
         audit_info["bi_cases_df"].to_excel(writer, sheet_name="BI2_No_Assessment", index=False)
         audit_info["flagged_cases_df"].to_excel(writer, sheet_name="T1T2_Flagged_Cases", index=False)
         audit_info["illogical_values_df"].to_excel(writer, sheet_name="Illogical_T1T2", index=False)
+        audit_info["raw_outliers_df"].to_excel(writer, sheet_name="Functional_Outliers", index=False)
     print(f"\nSaved: {OUTPUT_XLSX.name}")
 
     write_combined_report(lasso_results, ipcw_completion, ipcw_tier_results, audit_info)
