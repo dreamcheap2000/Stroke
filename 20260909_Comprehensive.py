@@ -272,7 +272,7 @@ def bootstrap_youden_summary(y_true: np.ndarray, scores: np.ndarray,
     return out
 
 
-def analyse_binary_models(source, df: pd.DataFrame, features: list[str], scenario_name: str) -> tuple[dict, pd.DataFrame]:
+def analyse_binary_models(source, df: pd.DataFrame, features: list[str], scenario_name: str) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     scenario_col = SCENARIO_COLUMNS[scenario_name]
     model_df = df[df[scenario_col].notna()].copy()
     valid_features = source._filter_existing(features, model_df)
@@ -282,7 +282,11 @@ def analyse_binary_models(source, df: pd.DataFrame, features: list[str], scenari
     cv_splits = list(cv.split(X, y))
 
     rows: list[dict] = []
+    coefficient_rows: list[dict] = []
     candidates = source._binary_candidates(valid_features)
+    candidates = {name: pipe for name, pipe in candidates.items() if "LogisticRegression" in name}
+    if not candidates:
+        raise ValueError("No logistic regression candidate was found in source._binary_candidates().")
     for name, pipe in candidates.items():
         scores = cross_validate(
             clone(pipe),
@@ -301,6 +305,20 @@ def analyse_binary_models(source, df: pd.DataFrame, features: list[str], scenari
             n_jobs=-1,
         )[:, 1]
         youden = bootstrap_youden_summary(y, oof_prob)
+        fitted_pipe = clone(pipe)
+        fitted_pipe.fit(X, y)
+        fitted_model = fitted_pipe.named_steps["model"]
+        coefficient_rows.append({
+            "Predictor": "(Intercept)",
+            "Coefficient": float(fitted_model.intercept_[0]),
+            "Abs_Coefficient": abs(float(fitted_model.intercept_[0])),
+        })
+        for predictor, coef in zip(valid_features, fitted_model.coef_[0]):
+            coefficient_rows.append({
+                "Predictor": predictor,
+                "Coefficient": float(coef),
+                "Abs_Coefficient": abs(float(coef)),
+            })
         rows.append({
             "Binary_model": name,
             "Binary_model_short": short_binary_model(name),
@@ -337,7 +355,8 @@ def analyse_binary_models(source, df: pd.DataFrame, features: list[str], scenari
         ascending=[False, False, False],
     ).reset_index(drop=True)
     selected = leaderboard.iloc[0].to_dict()
-    return selected, leaderboard
+    coefficients = pd.DataFrame(coefficient_rows)
+    return selected, leaderboard, coefficients
 
 
 def build_ranked_model_frame(source, lasso_summary: pd.DataFrame, ipcw_summary: pd.DataFrame) -> pd.DataFrame:
@@ -363,7 +382,7 @@ def build_ranked_model_frame(source, lasso_summary: pd.DataFrame, ipcw_summary: 
     return ranked
 
 
-def build_outputs(source) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def build_outputs(source) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     predictions_df = pd.read_excel(SOURCE_XLSX, sheet_name="Predictions")
     lasso_summary = pd.read_excel(SOURCE_XLSX, sheet_name="LASSO_Summary")
     ipcw_summary = pd.read_excel(SOURCE_XLSX, sheet_name="IPCW_Summary")
@@ -371,17 +390,23 @@ def build_outputs(source) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.
     ranked_models = build_ranked_model_frame(source, lasso_summary, ipcw_summary)
     scenario_rows: list[dict] = []
     leaderboard_rows: list[pd.DataFrame] = []
+    coefficient_frames: list[pd.DataFrame] = []
 
     for _, model_row in ranked_models.iterrows():
         model_full_name = model_row["Model_full_name"]
         features = source.MODEL_SPECS[model_full_name]
         for scenario_name in SCENARIO_ORDER:
-            selected, leaderboard = analyse_binary_models(source, predictions_df, features, scenario_name)
+            selected, leaderboard, coefficients = analyse_binary_models(source, predictions_df, features, scenario_name)
             leaderboard = leaderboard.copy()
             leaderboard.insert(0, "Scenario", scenario_name)
             leaderboard.insert(0, "Model_label", model_row["Model_label"])
             leaderboard.insert(0, "Acronym", model_row["Acronym"])
             leaderboard_rows.append(leaderboard)
+            coefficients = coefficients.copy()
+            coefficients.insert(0, "Scenario", scenario_name)
+            coefficients.insert(0, "Model_label", model_row["Model_label"])
+            coefficients.insert(0, "Acronym", model_row["Acronym"])
+            coefficient_frames.append(coefficients)
 
             scenario_rows.append({
                 "Overall_Rank": int(model_row["Overall_Rank"]),
@@ -412,6 +437,7 @@ def build_outputs(source) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.
         ["Scenario", "Overall_Rank"], ascending=[True, True]
     ).reset_index(drop=True)
     leaderboard_df = pd.concat(leaderboard_rows, ignore_index=True)
+    coefficients_df = pd.concat(coefficient_frames, ignore_index=True)
     explainers_df = ranked_models[[
         "Overall_Rank",
         "Model_label",
@@ -426,16 +452,18 @@ def build_outputs(source) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.
         "Weighted_OOF_R2",
         "Weighted_OOF_MAE",
     ]].copy()
-    return ranked_models, scenario_df, leaderboard_df, explainers_df, predictions_df
+    return ranked_models, scenario_df, leaderboard_df, explainers_df, coefficients_df, predictions_df
 
 
 def write_excel(ranked_models: pd.DataFrame, scenario_df: pd.DataFrame,
-                leaderboard_df: pd.DataFrame, explainers_df: pd.DataFrame) -> None:
+                leaderboard_df: pd.DataFrame, explainers_df: pd.DataFrame,
+                coefficients_df: pd.DataFrame) -> None:
     with pd.ExcelWriter(OUTPUT_XLSX, engine="openpyxl") as writer:
         ranked_models.to_excel(writer, sheet_name="Model_Ranking", index=False)
         scenario_df.to_excel(writer, sheet_name="Scenario_Performance", index=False)
         leaderboard_df.to_excel(writer, sheet_name="Binary_Leaderboards", index=False)
         explainers_df.to_excel(writer, sheet_name="Model_Explainers", index=False)
+        coefficients_df.to_excel(writer, sheet_name="Logistic_Coefficients", index=False)
 
 
 def table1_rows(scenario_df: pd.DataFrame) -> list[list[str]]:
@@ -446,7 +474,6 @@ def table1_rows(scenario_df: pd.DataFrame) -> list[list[str]]:
         "Source model",
         "Predictor summary",
         "Scenario",
-        "Binary model",
         "Youden cutpoint [95% CI]",
         "Sensitivity [95% CI]",
         "Specificity [95% CI]",
@@ -461,7 +488,6 @@ def table1_rows(scenario_df: pd.DataFrame) -> list[list[str]]:
             row["Model_label"],
             f"{int(row['Predictor_count'])} vars; {row['Predictor_categories_summary']}",
             row["Scenario"],
-            row["Binary_model_short"],
             fmt_ci(row["Youden_threshold"], row["Threshold_CI_lo"], row["Threshold_CI_hi"], 3),
             fmt_ci(row["Sensitivity"], row["Sensitivity_CI_lo"], row["Sensitivity_CI_hi"], 3),
             fmt_ci(row["Specificity"], row["Specificity_CI_lo"], row["Specificity_CI_hi"], 3),
@@ -503,7 +529,7 @@ def write_table1_docx(scenario_df: pd.DataFrame) -> None:
 
 
 def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFrame,
-                             leaderboard_df: pd.DataFrame) -> None:
+                             coefficients_df: pd.DataFrame) -> None:
     doc = Document()
     title = doc.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -521,9 +547,8 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
         run.font.size = Pt(9)
 
     methods = doc.add_paragraph(
-        "Binary classifiers from Part 2 were re-evaluated using out-of-fold predicted probabilities. "
-        "For each retained model and each scenario (Best and Worst), the selected classifier was the same candidate "
-        "chosen in the 2026-09-04 pipeline by default 5-fold cross-validated balanced accuracy. A Youden-optimal "
+        "Part 2 logistic-regression classifiers were re-evaluated using out-of-fold predicted probabilities. "
+        "For each retained model and each scenario (Best and Worst), a Youden-optimal "
         "cutpoint was then derived from the out-of-fold ROC curve, and bootstrap percentile confidence intervals "
         "around the cutpoint and its operating characteristics were estimated from 2,000 resamples."
     )
@@ -550,7 +575,7 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
 
     for scenario_name in SCENARIO_ORDER:
         scenario_rows = [[
-            "Rank", "Acronym", "Binary model", "Cutpoint [95% CI]",
+            "Rank", "Acronym", "Cutpoint [95% CI]",
             "Sensitivity [95% CI]", "Specificity [95% CI]", "Balanced accuracy [95% CI]",
             "Accuracy [95% CI]", "Bootstrap n",
         ]]
@@ -559,7 +584,6 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
             scenario_rows.append([
                 str(int(row["Overall_Rank"])),
                 row["Acronym"],
-                row["Binary_model_short"],
                 fmt_ci(row["Youden_threshold"], row["Threshold_CI_lo"], row["Threshold_CI_hi"], 3),
                 fmt_ci(row["Sensitivity"], row["Sensitivity_CI_lo"], row["Sensitivity_CI_hi"], 3),
                 fmt_ci(row["Specificity"], row["Specificity_CI_lo"], row["Specificity_CI_hi"], 3),
@@ -597,13 +621,12 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
 
         this_model = scenario_df[scenario_df["Model_label"] == row["Model_label"]]
         op_rows = [[
-            "Scenario", "Binary model", "Cutpoint [95% CI]", "Se [95% CI]",
+            "Scenario", "Cutpoint [95% CI]", "Se [95% CI]",
             "Sp [95% CI]", "BalAcc [95% CI]", "Acc [95% CI]",
         ]]
         for _, op in this_model.iterrows():
             op_rows.append([
                 op["Scenario"],
-                op["Binary_model_short"],
                 fmt_ci(op["Youden_threshold"], op["Threshold_CI_lo"], op["Threshold_CI_hi"], 3),
                 fmt_ci(op["Sensitivity"], op["Sensitivity_CI_lo"], op["Sensitivity_CI_hi"], 3),
                 fmt_ci(op["Specificity"], op["Specificity_CI_lo"], op["Specificity_CI_hi"], 3),
@@ -612,21 +635,26 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
             ])
         add_styled_table(doc, op_rows, font_size=8)
 
-        leaders = leaderboard_df[
-            (leaderboard_df["Model_label"] == row["Model_label"])
-        ][[
-            "Scenario", "Binary_model_short", "Default_balanced_accuracy", "Default_accuracy", "Default_f1",
-            "Balanced_Accuracy", "Accuracy", "Youden_threshold"
-        ]].copy()
-        leaders["Default_balanced_accuracy"] = leaders["Default_balanced_accuracy"].map(lambda v: fmt_num(v, 3))
-        leaders["Default_accuracy"] = leaders["Default_accuracy"].map(lambda v: fmt_num(v, 3))
-        leaders["Default_f1"] = leaders["Default_f1"].map(lambda v: fmt_num(v, 3))
-        leaders["Balanced_Accuracy"] = leaders["Balanced_Accuracy"].map(lambda v: fmt_num(v, 3))
-        leaders["Accuracy"] = leaders["Accuracy"].map(lambda v: fmt_num(v, 3))
-        leaders["Youden_threshold"] = leaders["Youden_threshold"].map(lambda v: fmt_num(v, 3))
-        rows = [["Scenario", "Candidate binary model", "Default BalAcc", "Default Acc", "Default F1", "Youden BalAcc", "Youden Acc", "Cutpoint"]]
-        rows.extend(leaders.astype(str).values.tolist())
-        add_styled_table(doc, rows, title="Candidate binary classifiers", font_size=8)
+        model_coef = coefficients_df[coefficients_df["Model_label"] == row["Model_label"]].copy()
+        coef_pivot = (
+            model_coef
+            .pivot_table(index="Predictor", columns="Scenario", values="Coefficient", aggfunc="first")
+            .reset_index()
+        )
+        coef_abs = (
+            model_coef.groupby("Predictor", as_index=False)["Abs_Coefficient"].max()
+            .rename(columns={"Abs_Coefficient": "MaxAbs"})
+        )
+        coef_pivot = coef_pivot.merge(coef_abs, on="Predictor", how="left")
+        coef_pivot = coef_pivot.sort_values("MaxAbs", ascending=False)
+        coef_rows = [["Predictor", "Best coefficient", "Worst coefficient"]]
+        for _, coef_row in coef_pivot.iterrows():
+            coef_rows.append([
+                coef_row["Predictor"],
+                fmt_num(float(coef_row["Best"]), 4) if "Best" in coef_pivot.columns and math.isfinite(float(coef_row["Best"])) else "N/A",
+                fmt_num(float(coef_row["Worst"]), 4) if "Worst" in coef_pivot.columns and math.isfinite(float(coef_row["Worst"])) else "N/A",
+            ])
+        add_styled_table(doc, coef_rows, title="Logistic regression coefficients (Best vs Worst)", font_size=8)
 
     reproducibility = doc.add_paragraph(
         "Reproducibility: run `python 20260909_Comprehensive.py` from the repository root clone to regenerate "
@@ -644,10 +672,10 @@ def main() -> None:
         raise FileNotFoundError(f"Missing source workbook: {SOURCE_XLSX}")
 
     source = load_source_module()
-    ranked_models, scenario_df, leaderboard_df, explainers_df, _ = build_outputs(source)
-    write_excel(ranked_models, scenario_df, leaderboard_df, explainers_df)
+    ranked_models, scenario_df, leaderboard_df, explainers_df, coefficients_df, _ = build_outputs(source)
+    write_excel(ranked_models, scenario_df, leaderboard_df, explainers_df, coefficients_df)
     write_table1_docx(scenario_df)
-    write_comprehensive_docx(ranked_models, scenario_df, leaderboard_df)
+    write_comprehensive_docx(ranked_models, scenario_df, coefficients_df)
 
     print(f"Saved: {OUTPUT_XLSX.name}")
     print(f"Saved: {OUTPUT_TABLE1.name}")
