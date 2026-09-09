@@ -1,0 +1,658 @@
+#!/usr/bin/env python3
+"""
+20260909_Comprehensive.py
+=========================
+Post-processing companion to 20260904_Comprehensive_1018.py.
+
+This script reuses the retained five-model comprehensive analysis and adds:
+  1. Youden-optimal cutpoints for the Part 2 binary classifiers.
+  2. Bootstrap percentile confidence intervals around the cutpoints.
+  3. Scenario-specific sensitivity, specificity, balanced accuracy, and accuracy.
+  4. Publication-style model names/acronyms and ranked summary tables.
+
+Outputs:
+    20260909_Comprehensive.docx
+    20260909_Comprehensive.xlsx
+    20260909_Table1_2016.docx
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import math
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+from docx import Document
+from docx.enum.section import WD_ORIENT
+from docx.enum.table import WD_ALIGN_VERTICAL
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.shared import Inches, Pt, RGBColor
+from sklearn.base import clone
+from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_matrix, roc_curve
+from sklearn.model_selection import StratifiedKFold, cross_val_predict, cross_validate
+
+ROOT = Path(__file__).resolve().parent
+SOURCE_SCRIPT = ROOT / "20260904_Comprehensive_1018.py"
+SOURCE_XLSX = ROOT / "20260904_Comprehensive_1018.xlsx"
+OUTPUT_DOCX = ROOT / "20260909_Comprehensive.docx"
+OUTPUT_XLSX = ROOT / "20260909_Comprehensive.xlsx"
+OUTPUT_TABLE1 = ROOT / "20260909_Table1_2016.docx"
+
+RANDOM_STATE = 42
+CV_FOLDS = 5
+N_BOOTSTRAP_THRESHOLD = 2000
+
+MODEL_BRANDING = {
+    "Model 5": {
+        "acronym": "RESTORE",
+        "publication_name": "REhabilitation STroke Outcome Recovery Estimator",
+        "focus": "Recovery trajectory using baseline function, gait speed, and early T1-to-T2 improvement among LOS ≥21 days.",
+    },
+    "Model 8": {
+        "acronym": "COMPASS",
+        "publication_name": "COMPrehensive Post-Acute Stroke Score",
+        "focus": "Broad post-acute clinical and functional profile with imputed gait speed, without NIHSS discharge items.",
+    },
+    "Model 2": {
+        "acronym": "CASCADE",
+        "publication_name": "Clinical And Stroke Complexity Assessment for Discharge Endurance",
+        "focus": "Full clinical burden model integrating stroke topology, comorbidities, complications, NIHSS, and function.",
+    },
+    "Model 1": {
+        "acronym": "AIMS",
+        "publication_name": "Admission Impairment Mobility Score",
+        "focus": "Admission functional core using demographics, bedside disability, and imputed gait speed.",
+    },
+    "Model 4": {
+        "acronym": "BEDSIDE",
+        "publication_name": "Balance-Enhanced Demographic Speed Index for Discharge Endurance",
+        "focus": "Ultra-compact bedside model built from age, sex, balance, and gait speed.",
+    },
+}
+
+SCENARIO_ORDER = ["Best", "Worst"]
+SCENARIO_COLUMNS = {
+    "Best": "6MWT_Best_Scenario",
+    "Worst": "6MWT_Worst_Scenario",
+}
+SCENARIO_NOTES = {
+    "Best": "Optimistic non-completer walking classification scenario.",
+    "Worst": "Conservative non-completer walking classification scenario.",
+}
+
+HEADER_FILL = "1F4E78"
+SUBHEADER_FILL = "5B9BD5"
+ALT_ROW_FILL = "EEF4FA"
+
+
+def load_source_module():
+    spec = importlib.util.spec_from_file_location("comp20260904", SOURCE_SCRIPT)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load source script: {SOURCE_SCRIPT}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def fmt_num(value: float, digits: int = 3) -> str:
+    return f"{value:.{digits}f}" if math.isfinite(value) else "N/A"
+
+
+def fmt_ci(point: float, lo: float, hi: float, digits: int = 3) -> str:
+    if not all(math.isfinite(v) for v in [point, lo, hi]):
+        return "N/A"
+    return f"{point:.{digits}f} [{lo:.{digits}f}, {hi:.{digits}f}]"
+
+
+def short_binary_model(name: str) -> str:
+    mapping = {
+        "LogisticRegression(class_weight='balanced', solver='liblinear')": "Logistic regression",
+        "RandomForestClassifier(n_estimators=300, class_weight='balanced')": "Random forest",
+        "ExtraTreesClassifier(n_estimators=300, class_weight='balanced')": "Extra trees",
+    }
+    return mapping.get(name, name)
+
+
+def shade_row(row, fill: str) -> None:
+    tr = row._tr
+    tr_pr = tr.get_or_add_trPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), fill)
+    tr_pr.append(shd)
+
+
+def set_cell_text(cell, text: str, *, bold: bool = False, size: int = 8, color: str | None = None,
+                  align: WD_ALIGN_PARAGRAPH = WD_ALIGN_PARAGRAPH.CENTER) -> None:
+    cell.text = str(text)
+    cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+    for para in cell.paragraphs:
+        para.alignment = align
+        for run in para.runs:
+            run.font.size = Pt(size)
+            run.font.bold = bold
+            if color is not None:
+                run.font.color.rgb = RGBColor.from_string(color)
+
+
+def add_styled_table(doc: Document, rows: list[list[str]], *, title: str | None = None,
+                     font_size: int = 8, landscape: bool = False,
+                     first_col_left: bool = True) -> None:
+    if title:
+        p = doc.add_paragraph()
+        p.add_run(title).bold = True
+    if not rows:
+        return
+    if landscape:
+        ensure_landscape(doc)
+    table = doc.add_table(rows=len(rows), cols=len(rows[0]))
+    table.style = "Table Grid"
+    table.autofit = True
+    for i, row_values in enumerate(rows):
+        row = table.rows[i]
+        if i == 0:
+            shade_row(row, HEADER_FILL)
+        elif i == 1 and any(str(v).startswith("__SUBHEADER__") for v in row_values):
+            shade_row(row, SUBHEADER_FILL)
+        elif i % 2 == 1:
+            shade_row(row, ALT_ROW_FILL)
+        for j, value in enumerate(row_values):
+            display_value = str(value).replace("__SUBHEADER__", "")
+            align = WD_ALIGN_PARAGRAPH.LEFT if first_col_left and j == 0 else WD_ALIGN_PARAGRAPH.CENTER
+            set_cell_text(
+                table.cell(i, j),
+                display_value,
+                bold=i in (0, 1),
+                size=font_size,
+                color="FFFFFF" if i in (0, 1) else None,
+                align=align,
+            )
+    doc.add_paragraph()
+
+
+def ensure_landscape(doc: Document) -> None:
+    section = doc.sections[-1]
+    if section.orientation != WD_ORIENT.LANDSCAPE:
+        section.orientation = WD_ORIENT.LANDSCAPE
+        section.page_width, section.page_height = section.page_height, section.page_width
+    section.left_margin = Inches(0.4)
+    section.right_margin = Inches(0.4)
+    section.top_margin = Inches(0.5)
+    section.bottom_margin = Inches(0.5)
+
+
+def evaluate_threshold(y_true: np.ndarray, scores: np.ndarray, threshold: float) -> dict[str, float]:
+    y_pred = (scores >= threshold).astype(int)
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
+    sensitivity = tp / (tp + fn) if (tp + fn) else float("nan")
+    specificity = tn / (tn + fp) if (tn + fp) else float("nan")
+    bal_acc = balanced_accuracy_score(y_true, y_pred)
+    accuracy = accuracy_score(y_true, y_pred)
+    return {
+        "threshold": float(threshold),
+        "sensitivity": float(sensitivity),
+        "specificity": float(specificity),
+        "balanced_accuracy": float(bal_acc),
+        "accuracy": float(accuracy),
+        "tp": int(tp),
+        "fp": int(fp),
+        "tn": int(tn),
+        "fn": int(fn),
+    }
+
+
+def youden_optimal_metrics(y_true: np.ndarray, scores: np.ndarray) -> dict[str, float]:
+    fpr, tpr, thresholds = roc_curve(y_true, scores)
+    finite = np.isfinite(thresholds)
+    fpr = fpr[finite]
+    tpr = tpr[finite]
+    thresholds = thresholds[finite]
+    if len(thresholds) == 0:
+        raise ValueError("No finite ROC thresholds were produced.")
+    youden = tpr - fpr
+    specificity = 1 - fpr
+    balance_gap = np.abs(tpr - specificity)
+    order = np.lexsort((
+        np.abs(thresholds - 0.5),
+        balance_gap,
+        -specificity,
+        -tpr,
+        -youden,
+    ))
+    best_idx = int(order[0])
+    metrics = evaluate_threshold(y_true, scores, float(thresholds[best_idx]))
+    metrics["youden_j"] = float(youden[best_idx])
+    return metrics
+
+
+def bootstrap_youden_summary(y_true: np.ndarray, scores: np.ndarray,
+                             *, n_bootstrap: int = N_BOOTSTRAP_THRESHOLD,
+                             seed: int = RANDOM_STATE) -> dict[str, float]:
+    point = youden_optimal_metrics(y_true, scores)
+    rng = np.random.default_rng(seed)
+    stats = {
+        "threshold": [],
+        "sensitivity": [],
+        "specificity": [],
+        "balanced_accuracy": [],
+        "accuracy": [],
+        "youden_j": [],
+    }
+
+    for _ in range(n_bootstrap):
+        idx = rng.integers(0, len(y_true), size=len(y_true))
+        y_boot = y_true[idx]
+        if np.unique(y_boot).size < 2:
+            continue
+        boot_metrics = youden_optimal_metrics(y_boot, scores[idx])
+        for key in stats:
+            stats[key].append(boot_metrics[key])
+
+    def ci(values: list[float]) -> tuple[float, float, float]:
+        if not values:
+            return float("nan"), float("nan"), float("nan")
+        arr = np.asarray(values, dtype=float)
+        return float(arr.mean()), float(np.percentile(arr, 2.5)), float(np.percentile(arr, 97.5))
+
+    out = point.copy()
+    for key, values in stats.items():
+        mean_v, lo_v, hi_v = ci(values)
+        out[f"{key}_boot_mean"] = mean_v
+        out[f"{key}_ci_lo"] = lo_v
+        out[f"{key}_ci_hi"] = hi_v
+    out["bootstrap_valid_resamples"] = len(stats["threshold"])
+    out["n_positive"] = int(y_true.sum())
+    out["n_negative"] = int((1 - y_true).sum())
+    out["prevalence"] = float(y_true.mean())
+    return out
+
+
+def analyse_binary_models(source, df: pd.DataFrame, features: list[str], scenario_name: str) -> tuple[dict, pd.DataFrame]:
+    scenario_col = SCENARIO_COLUMNS[scenario_name]
+    model_df = df[df[scenario_col].notna()].copy()
+    valid_features = source._filter_existing(features, model_df)
+    X = model_df[valid_features]
+    y = model_df[scenario_col].astype(int).to_numpy()
+    cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
+    cv_splits = list(cv.split(X, y))
+
+    rows: list[dict] = []
+    candidates = source._binary_candidates(valid_features)
+    for name, pipe in candidates.items():
+        scores = cross_validate(
+            clone(pipe),
+            X,
+            y,
+            cv=cv_splits,
+            n_jobs=-1,
+            scoring=["balanced_accuracy", "accuracy", "f1"],
+        )
+        oof_prob = cross_val_predict(
+            clone(pipe),
+            X,
+            y,
+            cv=cv_splits,
+            method="predict_proba",
+            n_jobs=-1,
+        )[:, 1]
+        youden = bootstrap_youden_summary(y, oof_prob)
+        rows.append({
+            "Binary_model": name,
+            "Binary_model_short": short_binary_model(name),
+            "Default_balanced_accuracy": float(np.mean(scores["test_balanced_accuracy"])),
+            "Default_accuracy": float(np.mean(scores["test_accuracy"])),
+            "Default_f1": float(np.mean(scores["test_f1"])),
+            "OOF_probability_mean": float(np.mean(oof_prob)),
+            "Youden_threshold": youden["threshold"],
+            "Threshold_CI_lo": youden["threshold_ci_lo"],
+            "Threshold_CI_hi": youden["threshold_ci_hi"],
+            "Sensitivity": youden["sensitivity"],
+            "Sensitivity_CI_lo": youden["sensitivity_ci_lo"],
+            "Sensitivity_CI_hi": youden["sensitivity_ci_hi"],
+            "Specificity": youden["specificity"],
+            "Specificity_CI_lo": youden["specificity_ci_lo"],
+            "Specificity_CI_hi": youden["specificity_ci_hi"],
+            "Balanced_Accuracy": youden["balanced_accuracy"],
+            "Balanced_Accuracy_CI_lo": youden["balanced_accuracy_ci_lo"],
+            "Balanced_Accuracy_CI_hi": youden["balanced_accuracy_ci_hi"],
+            "Accuracy": youden["accuracy"],
+            "Accuracy_CI_lo": youden["accuracy_ci_lo"],
+            "Accuracy_CI_hi": youden["accuracy_ci_hi"],
+            "Youden_J": youden["youden_j"],
+            "Youden_J_CI_lo": youden["youden_j_ci_lo"],
+            "Youden_J_CI_hi": youden["youden_j_ci_hi"],
+            "Bootstrap_valid_resamples": youden["bootstrap_valid_resamples"],
+            "N_positive": youden["n_positive"],
+            "N_negative": youden["n_negative"],
+            "Prevalence": youden["prevalence"],
+        })
+
+    leaderboard = pd.DataFrame(rows).sort_values(
+        ["Default_balanced_accuracy", "Default_accuracy", "Default_f1"],
+        ascending=[False, False, False],
+    ).reset_index(drop=True)
+    selected = leaderboard.iloc[0].to_dict()
+    return selected, leaderboard
+
+
+def build_ranked_model_frame(source, lasso_summary: pd.DataFrame, ipcw_summary: pd.DataFrame) -> pd.DataFrame:
+    ipcw_unique = (
+        ipcw_summary.groupby("Model", as_index=False)[["Weighted_OOF_R2", "Weighted_OOF_MAE", "Binary_OOF_Bal_Acc"]]
+        .mean()
+        .rename(columns={"Model": "Model_label"})
+    )
+    lasso = lasso_summary.copy().rename(columns={"Model": "Model_full_name"})
+    lasso["Model_label"] = lasso["Model_full_name"].str.split(":", n=1).str[0]
+    ranked = lasso.merge(ipcw_unique, on="Model_label", how="left")
+    ranked = ranked.sort_values(
+        ["Weighted_OOF_R2", "CV_R2", "Weighted_OOF_MAE", "CV_MAE"],
+        ascending=[False, False, True, True],
+    ).reset_index(drop=True)
+    ranked["Overall_Rank"] = np.arange(1, len(ranked) + 1)
+    ranked["Acronym"] = ranked["Model_label"].map(lambda s: MODEL_BRANDING[s]["acronym"])
+    ranked["Publication_Name"] = ranked["Model_label"].map(lambda s: MODEL_BRANDING[s]["publication_name"])
+    ranked["Model_Focus"] = ranked["Model_label"].map(lambda s: MODEL_BRANDING[s]["focus"])
+    ranked["Predictor_List"] = ranked["Model_full_name"].map(
+        lambda name: ", ".join(source.MODEL_SPECS[name])
+    )
+    return ranked
+
+
+def build_outputs(source) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    predictions_df = pd.read_excel(SOURCE_XLSX, sheet_name="Predictions")
+    lasso_summary = pd.read_excel(SOURCE_XLSX, sheet_name="LASSO_Summary")
+    ipcw_summary = pd.read_excel(SOURCE_XLSX, sheet_name="IPCW_Summary")
+
+    ranked_models = build_ranked_model_frame(source, lasso_summary, ipcw_summary)
+    scenario_rows: list[dict] = []
+    leaderboard_rows: list[pd.DataFrame] = []
+
+    for _, model_row in ranked_models.iterrows():
+        model_full_name = model_row["Model_full_name"]
+        features = source.MODEL_SPECS[model_full_name]
+        for scenario_name in SCENARIO_ORDER:
+            selected, leaderboard = analyse_binary_models(source, predictions_df, features, scenario_name)
+            leaderboard = leaderboard.copy()
+            leaderboard.insert(0, "Scenario", scenario_name)
+            leaderboard.insert(0, "Model_label", model_row["Model_label"])
+            leaderboard.insert(0, "Acronym", model_row["Acronym"])
+            leaderboard_rows.append(leaderboard)
+
+            scenario_rows.append({
+                "Overall_Rank": int(model_row["Overall_Rank"]),
+                "Model_label": model_row["Model_label"],
+                "Model_full_name": model_full_name,
+                "Acronym": model_row["Acronym"],
+                "Publication_Name": model_row["Publication_Name"],
+                "Model_Focus": model_row["Model_Focus"],
+                "Scenario": scenario_name,
+                "Scenario_note": SCENARIO_NOTES[scenario_name],
+                "Predictor_count": int(model_row["Input_vars"]),
+                "Predictor_categories_summary": model_row["Predictor_categories_summary"],
+                "LASSO_CV_R2": float(model_row["CV_R2"]),
+                "LASSO_CV_MAE": float(model_row["CV_MAE"]),
+                "IPCW_Weighted_OOF_R2": float(model_row["Weighted_OOF_R2"]),
+                "IPCW_Weighted_OOF_MAE": float(model_row["Weighted_OOF_MAE"]),
+                "Source_binary_OOF_bal_acc": float(
+                    ipcw_summary.loc[
+                        (ipcw_summary["Model"] == model_row["Model_label"])
+                        & (ipcw_summary["Scenario"] == scenario_name),
+                        "Binary_OOF_Bal_Acc",
+                    ].iloc[0]
+                ),
+                **selected,
+            })
+
+    scenario_df = pd.DataFrame(scenario_rows).sort_values(
+        ["Scenario", "Overall_Rank"], ascending=[True, True]
+    ).reset_index(drop=True)
+    leaderboard_df = pd.concat(leaderboard_rows, ignore_index=True)
+    explainers_df = ranked_models[[
+        "Overall_Rank",
+        "Model_label",
+        "Acronym",
+        "Publication_Name",
+        "Model_Focus",
+        "Predictor_categories_summary",
+        "Predictor_List",
+        "Input_vars",
+        "CV_R2",
+        "CV_MAE",
+        "Weighted_OOF_R2",
+        "Weighted_OOF_MAE",
+    ]].copy()
+    return ranked_models, scenario_df, leaderboard_df, explainers_df, predictions_df
+
+
+def write_excel(ranked_models: pd.DataFrame, scenario_df: pd.DataFrame,
+                leaderboard_df: pd.DataFrame, explainers_df: pd.DataFrame) -> None:
+    with pd.ExcelWriter(OUTPUT_XLSX, engine="openpyxl") as writer:
+        ranked_models.to_excel(writer, sheet_name="Model_Ranking", index=False)
+        scenario_df.to_excel(writer, sheet_name="Scenario_Performance", index=False)
+        leaderboard_df.to_excel(writer, sheet_name="Binary_Leaderboards", index=False)
+        explainers_df.to_excel(writer, sheet_name="Model_Explainers", index=False)
+
+
+def table1_rows(scenario_df: pd.DataFrame) -> list[list[str]]:
+    rows = [[
+        "Rank",
+        "Acronym",
+        "Publication-style model name",
+        "Source model",
+        "Predictor summary",
+        "Scenario",
+        "Binary model",
+        "Youden cutpoint [95% CI]",
+        "Sensitivity [95% CI]",
+        "Specificity [95% CI]",
+        "Balanced accuracy [95% CI]",
+        "Accuracy [95% CI]",
+    ]]
+    for _, row in scenario_df.iterrows():
+        rows.append([
+            str(int(row["Overall_Rank"])),
+            row["Acronym"],
+            row["Publication_Name"],
+            row["Model_label"],
+            f"{int(row['Predictor_count'])} vars; {row['Predictor_categories_summary']}",
+            row["Scenario"],
+            row["Binary_model_short"],
+            fmt_ci(row["Youden_threshold"], row["Threshold_CI_lo"], row["Threshold_CI_hi"], 3),
+            fmt_ci(row["Sensitivity"], row["Sensitivity_CI_lo"], row["Sensitivity_CI_hi"], 3),
+            fmt_ci(row["Specificity"], row["Specificity_CI_lo"], row["Specificity_CI_hi"], 3),
+            fmt_ci(row["Balanced_Accuracy"], row["Balanced_Accuracy_CI_lo"], row["Balanced_Accuracy_CI_hi"], 3),
+            fmt_ci(row["Accuracy"], row["Accuracy_CI_lo"], row["Accuracy_CI_hi"], 3),
+        ])
+    return rows
+
+
+def write_table1_docx(scenario_df: pd.DataFrame) -> None:
+    doc = Document()
+    ensure_landscape(doc)
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.add_run("Table 1. Retained five-model stroke PAC summary with scenario-specific Youden cutpoints")
+    run.bold = True
+    run.font.size = Pt(11)
+
+    subtitle = doc.add_paragraph(
+        "Cohort: post-acute care stroke rehabilitation patients transferred from the neurology ward; "
+        "stroke topology, comorbidities, complications, and NIHSS were recorded acutely, and discharge-to-PAC "
+        "functional assessments included gait speed and the 6-minute walk test."
+    )
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in subtitle.runs:
+        run.font.size = Pt(8)
+
+    add_styled_table(doc, table1_rows(scenario_df), font_size=7, landscape=True)
+    legend = doc.add_paragraph()
+    legend.add_run("Abbreviations. ").bold = True
+    legend.add_run(
+        "PAC = post-acute care; IPCW = inverse probability of completion weighting; "
+        "OOF = out-of-fold; CI = percentile bootstrap 95% confidence interval from 2,000 resamples of paired OOF "
+        "probabilities and observed binary outcomes; the Youden cutpoint maximized sensitivity + specificity - 1."
+    )
+    for run in legend.runs:
+        run.font.size = Pt(8)
+    doc.save(OUTPUT_TABLE1)
+
+
+def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFrame,
+                             leaderboard_df: pd.DataFrame) -> None:
+    doc = Document()
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = title.add_run("2026-09-09 Comprehensive Stroke PAC Model Update")
+    run.bold = True
+    run.font.size = Pt(12)
+
+    intro = doc.add_paragraph(
+        "This report extends the retained five-model 2026-09-04 comprehensive analysis. "
+        "The cohort is a post-acute care stroke rehabilitation cohort initially hospitalized in a neurology ward, "
+        "where stroke topology, comorbidities, complications, and NIHSS were recorded. After transfer to the PAC "
+        "rehabilitation ward, functional assessments were recorded, including gait speed and the 6-minute walk test."
+    )
+    for run in intro.runs:
+        run.font.size = Pt(9)
+
+    methods = doc.add_paragraph(
+        "Binary classifiers from Part 2 were re-evaluated using out-of-fold predicted probabilities. "
+        "For each retained model and each scenario (Best and Worst), the selected classifier was the same candidate "
+        "chosen in the 2026-09-04 pipeline by default 5-fold cross-validated balanced accuracy. A Youden-optimal "
+        "cutpoint was then derived from the out-of-fold ROC curve, and bootstrap percentile confidence intervals "
+        "around the cutpoint and its operating characteristics were estimated from 2,000 resamples."
+    )
+    for run in methods.runs:
+        run.font.size = Pt(9)
+
+    ranking_rows = [[
+        "Rank", "Acronym", "Publication name", "Source model", "Input vars",
+        "Step 1 CV R²", "Step 1 CV MAE", "Part 2 weighted OOF R²", "Part 2 weighted OOF MAE",
+    ]]
+    for _, row in ranked_models.iterrows():
+        ranking_rows.append([
+            str(int(row["Overall_Rank"])),
+            row["Acronym"],
+            row["Publication_Name"],
+            row["Model_label"],
+            str(int(row["Input_vars"])),
+            fmt_num(row["CV_R2"], 4),
+            fmt_num(row["CV_MAE"], 2),
+            fmt_num(row["Weighted_OOF_R2"], 4),
+            fmt_num(row["Weighted_OOF_MAE"], 1),
+        ])
+    add_styled_table(doc, ranking_rows, title="Overall ranking of the retained five models", font_size=8)
+
+    for scenario_name in SCENARIO_ORDER:
+        scenario_rows = [[
+            "Rank", "Acronym", "Binary model", "Cutpoint [95% CI]",
+            "Sensitivity [95% CI]", "Specificity [95% CI]", "Balanced accuracy [95% CI]",
+            "Accuracy [95% CI]", "Bootstrap n",
+        ]]
+        scenario_slice = scenario_df[scenario_df["Scenario"] == scenario_name]
+        for _, row in scenario_slice.iterrows():
+            scenario_rows.append([
+                str(int(row["Overall_Rank"])),
+                row["Acronym"],
+                row["Binary_model_short"],
+                fmt_ci(row["Youden_threshold"], row["Threshold_CI_lo"], row["Threshold_CI_hi"], 3),
+                fmt_ci(row["Sensitivity"], row["Sensitivity_CI_lo"], row["Sensitivity_CI_hi"], 3),
+                fmt_ci(row["Specificity"], row["Specificity_CI_lo"], row["Specificity_CI_hi"], 3),
+                fmt_ci(row["Balanced_Accuracy"], row["Balanced_Accuracy_CI_lo"], row["Balanced_Accuracy_CI_hi"], 3),
+                fmt_ci(row["Accuracy"], row["Accuracy_CI_lo"], row["Accuracy_CI_hi"], 3),
+                str(int(row["Bootstrap_valid_resamples"])),
+            ])
+        add_styled_table(
+            doc,
+            scenario_rows,
+            title=f"{scenario_name} scenario binary operating characteristics",
+            font_size=8,
+            landscape=True,
+        )
+
+    for _, row in ranked_models.iterrows():
+        section_head = doc.add_paragraph()
+        section_head.add_run(
+            f"Rank {int(row['Overall_Rank'])}. {row['Acronym']} — {row['Publication_Name']}"
+        ).bold = True
+
+        focus = doc.add_paragraph(f"Model focus: {row['Model_Focus']}")
+        predictors = doc.add_paragraph(
+            f"Predictors ({int(row['Input_vars'])}): {row['Predictor_categories_summary']}. "
+            f"Full list: {row['Predictor_List']}"
+        )
+        performance = doc.add_paragraph(
+            f"Step 1 performance: CV R² {fmt_num(row['CV_R2'], 4)} and CV MAE {fmt_num(row['CV_MAE'], 2)} m. "
+            f"Part 2 weighted OOF regression performance: R² {fmt_num(row['Weighted_OOF_R2'], 4)} and "
+            f"MAE {fmt_num(row['Weighted_OOF_MAE'], 1)} m."
+        )
+        for paragraph in [focus, predictors, performance]:
+            for run in paragraph.runs:
+                run.font.size = Pt(9)
+
+        this_model = scenario_df[scenario_df["Model_label"] == row["Model_label"]]
+        op_rows = [[
+            "Scenario", "Binary model", "Cutpoint [95% CI]", "Se [95% CI]",
+            "Sp [95% CI]", "BalAcc [95% CI]", "Acc [95% CI]",
+        ]]
+        for _, op in this_model.iterrows():
+            op_rows.append([
+                op["Scenario"],
+                op["Binary_model_short"],
+                fmt_ci(op["Youden_threshold"], op["Threshold_CI_lo"], op["Threshold_CI_hi"], 3),
+                fmt_ci(op["Sensitivity"], op["Sensitivity_CI_lo"], op["Sensitivity_CI_hi"], 3),
+                fmt_ci(op["Specificity"], op["Specificity_CI_lo"], op["Specificity_CI_hi"], 3),
+                fmt_ci(op["Balanced_Accuracy"], op["Balanced_Accuracy_CI_lo"], op["Balanced_Accuracy_CI_hi"], 3),
+                fmt_ci(op["Accuracy"], op["Accuracy_CI_lo"], op["Accuracy_CI_hi"], 3),
+            ])
+        add_styled_table(doc, op_rows, font_size=8)
+
+        leaders = leaderboard_df[
+            (leaderboard_df["Model_label"] == row["Model_label"])
+        ][[
+            "Scenario", "Binary_model_short", "Default_balanced_accuracy", "Default_accuracy", "Default_f1",
+            "Balanced_Accuracy", "Accuracy", "Youden_threshold"
+        ]].copy()
+        leaders["Default_balanced_accuracy"] = leaders["Default_balanced_accuracy"].map(lambda v: fmt_num(v, 3))
+        leaders["Default_accuracy"] = leaders["Default_accuracy"].map(lambda v: fmt_num(v, 3))
+        leaders["Default_f1"] = leaders["Default_f1"].map(lambda v: fmt_num(v, 3))
+        leaders["Balanced_Accuracy"] = leaders["Balanced_Accuracy"].map(lambda v: fmt_num(v, 3))
+        leaders["Accuracy"] = leaders["Accuracy"].map(lambda v: fmt_num(v, 3))
+        leaders["Youden_threshold"] = leaders["Youden_threshold"].map(lambda v: fmt_num(v, 3))
+        rows = [["Scenario", "Candidate binary model", "Default BalAcc", "Default Acc", "Default F1", "Youden BalAcc", "Youden Acc", "Cutpoint"]]
+        rows.extend(leaders.astype(str).values.tolist())
+        add_styled_table(doc, rows, title="Candidate binary classifiers", font_size=8)
+
+    reproducibility = doc.add_paragraph(
+        "Reproducibility: run `python 20260909_Comprehensive.py` from the repository root clone to regenerate "
+        "20260909_Comprehensive.docx, 20260909_Comprehensive.xlsx, and 20260909_Table1_2016.docx."
+    )
+    for run in reproducibility.runs:
+        run.font.size = Pt(8)
+    doc.save(OUTPUT_DOCX)
+
+
+def main() -> None:
+    if not SOURCE_SCRIPT.exists():
+        raise FileNotFoundError(f"Missing source script: {SOURCE_SCRIPT}")
+    if not SOURCE_XLSX.exists():
+        raise FileNotFoundError(f"Missing source workbook: {SOURCE_XLSX}")
+
+    source = load_source_module()
+    ranked_models, scenario_df, leaderboard_df, explainers_df, _ = build_outputs(source)
+    write_excel(ranked_models, scenario_df, leaderboard_df, explainers_df)
+    write_table1_docx(scenario_df)
+    write_comprehensive_docx(ranked_models, scenario_df, leaderboard_df)
+
+    print(f"Saved: {OUTPUT_XLSX.name}")
+    print(f"Saved: {OUTPUT_TABLE1.name}")
+    print(f"Saved: {OUTPUT_DOCX.name}")
+
+
+if __name__ == "__main__":
+    main()
