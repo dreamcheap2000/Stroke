@@ -788,12 +788,16 @@ def fit_bootstrap_lasso(
     sel_freq = (np.abs(coef_boot) > _COEF_TOL).mean(axis=0)
     coef_mean = coef_boot.mean(axis=0)
     coef_sd = coef_boot.std(axis=0, ddof=1)
+    coef_ci_lo = np.percentile(coef_boot, 2.5, axis=0)
+    coef_ci_hi = np.percentile(coef_boot, 97.5, axis=0)
 
     importance = pd.DataFrame({
         "predictor": features,
         "base_coef": base_coef,
         "bootstrap_coef_mean": coef_mean,
         "bootstrap_coef_sd": coef_sd,
+        "bootstrap_coef_ci_lo": coef_ci_lo,
+        "bootstrap_coef_ci_hi": coef_ci_hi,
         "selection_frequency": sel_freq,
         "abs_bootstrap_coef_mean": np.abs(coef_mean),
     }).sort_values(
@@ -1543,7 +1547,7 @@ def write_combined_report(
         imp = r["importance"].head(20)
         rows = [[
             "Predictor", "Direction", "Full-fit Coef",
-            "Boot Mean Coef", "Boot SD", "Selection Freq", "Stable",
+            "Boot Mean Coef", "Boot SD", "95% CI", "Selection Freq", "Stable",
         ]]
         for _, row in imp.iterrows():
             rows.append([
@@ -1552,6 +1556,7 @@ def write_combined_report(
                 f"{row['base_coef']:.5f}",
                 f"{row['bootstrap_coef_mean']:.5f}",
                 f"{row['bootstrap_coef_sd']:.5f}",
+                f"[{row['bootstrap_coef_ci_lo']:.5f}, {row['bootstrap_coef_ci_hi']:.5f}]",
                 f"{row['selection_frequency']:.3f}",
                 "Yes" if row["selection_frequency"] >= STABILITY_THRESHOLD else "No",
             ])

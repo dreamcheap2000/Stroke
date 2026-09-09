@@ -14,6 +14,8 @@ Outputs:
     20260909_Comprehensive.docx
     20260909_Comprehensive.xlsx
     20260909_Table1_2016.docx
+    20260909_Publication_Tables.md
+    20260909_Publication_Tables.tex
 """
 
 from __future__ import annotations
@@ -41,6 +43,11 @@ SOURCE_XLSX = ROOT / "20260904_Comprehensive_1018.xlsx"
 OUTPUT_DOCX = ROOT / "20260909_Comprehensive.docx"
 OUTPUT_XLSX = ROOT / "20260909_Comprehensive.xlsx"
 OUTPUT_TABLE1 = ROOT / "20260909_Table1_2016.docx"
+OUTPUT_PUBLICATION_MD = ROOT / "20260909_Publication_Tables.md"
+OUTPUT_PUBLICATION_TEX = ROOT / "20260909_Publication_Tables.tex"
+OUTPUT_PANEL_A_CSV = ROOT / "20260909_Publication_Table1_PanelA.csv"
+OUTPUT_PANEL_B_CSV = ROOT / "20260909_Publication_Table1_PanelB.csv"
+OUTPUT_TABLE2_CSV = ROOT / "20260909_Publication_Table2.csv"
 
 RANDOM_STATE = 42
 CV_FOLDS = 5
@@ -106,6 +113,13 @@ def fmt_ci(point: float, lo: float, hi: float, digits: int = 3) -> str:
     if not all(math.isfinite(v) for v in [point, lo, hi]):
         return "N/A"
     return f"{point:.{digits}f} [{lo:.{digits}f}, {hi:.{digits}f}]"
+
+
+def fmt_pct_ci(point: float, lo: float, hi: float, digits: int = 1) -> str:
+    if not all(math.isfinite(v) for v in [point, lo, hi]):
+        return "N/A"
+    scale = 100
+    return f"{point * scale:.{digits}f}% [{lo * scale:.{digits}f}, {hi * scale:.{digits}f}]"
 
 
 def short_binary_model(name: str) -> str:
@@ -184,6 +198,17 @@ def ensure_landscape(doc: Document) -> None:
     section.right_margin = Inches(0.4)
     section.top_margin = Inches(0.5)
     section.bottom_margin = Inches(0.5)
+
+
+def dataframe_to_markdown(df: pd.DataFrame) -> str:
+    headers = [str(col) for col in df.columns]
+    lines = [
+        "| " + " | ".join(headers) + " |",
+        "| " + " | ".join(["---"] * len(headers)) + " |",
+    ]
+    for row in df.fillna("—").astype(str).values.tolist():
+        lines.append("| " + " | ".join(row) + " |")
+    return "\n".join(lines)
 
 
 def evaluate_threshold(y_true: np.ndarray, scores: np.ndarray, threshold: float) -> dict[str, float]:
@@ -382,7 +407,183 @@ def build_ranked_model_frame(source, lasso_summary: pd.DataFrame, ipcw_summary: 
     return ranked
 
 
-def build_outputs(source) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def build_part1_coefficients(source, ranked_models: pd.DataFrame) -> pd.DataFrame:
+    df = pd.read_excel(source.INPUT_XLSX)
+    df, _ = source.apply_manual_patient_corrections(df)
+    df, _ = source.audit_and_clean_t1t2_data(df)
+
+    retained_model_specs = {
+        model_name: source.MODEL_SPECS[model_name]
+        for model_name in source.RETAINED_MODEL_ORDER
+        if model_name in source.MODEL_SPECS
+    }
+    all_candidate_cols = list({c for cols in retained_model_specs.values() for c in cols})
+    for col in all_candidate_cols + ["6MWT4"] + source.NIHSS_IN:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    coefficient_frames: list[pd.DataFrame] = []
+    for i, model_row in ranked_models.reset_index(drop=True).iterrows():
+        model_full_name = model_row["Model_full_name"]
+        candidate_features = retained_model_specs.get(model_full_name, source.MODEL_SPECS[model_full_name])
+        valid_features = source._filter_existing(candidate_features, df)
+        if not valid_features:
+            continue
+        is_t1t2_model = any(col in candidate_features for col in source.T1T2_IMPROVEMENT)
+        result = source.fit_bootstrap_lasso(
+            df,
+            valid_features,
+            model_full_name,
+            model_seed=source.RANDOM_STATE + i,
+            model5_restrict=is_t1t2_model,
+        )
+        importance = result["importance"].copy()
+        importance.insert(0, "Overall_Rank", int(model_row["Overall_Rank"]))
+        importance.insert(1, "Model_label", model_row["Model_label"])
+        importance.insert(2, "Acronym", model_row["Acronym"])
+        importance.insert(3, "Publication_Name", model_row["Publication_Name"])
+        importance.insert(4, "Input_vars", int(model_row["Input_vars"]))
+        importance.insert(5, "Model_full_name", model_full_name)
+        coefficient_frames.append(importance)
+
+    if not coefficient_frames:
+        return pd.DataFrame(columns=[
+            "Overall_Rank", "Model_label", "Acronym", "Publication_Name", "Input_vars", "Model_full_name",
+            "predictor", "base_coef", "bootstrap_coef_mean", "bootstrap_coef_sd",
+            "bootstrap_coef_ci_lo", "bootstrap_coef_ci_hi", "selection_frequency",
+            "abs_bootstrap_coef_mean",
+        ])
+
+    part1_df = pd.concat(coefficient_frames, ignore_index=True)
+    part1_df["Stable"] = part1_df["selection_frequency"] >= source.STABILITY_THRESHOLD
+    part1_df["Selection_Freq_Pct"] = (part1_df["selection_frequency"] * 100).round().astype(int).astype(str) + "%"
+    part1_df["Coef_95_CI"] = part1_df.apply(
+        lambda row: fmt_ci(
+            float(row["bootstrap_coef_mean"]),
+            float(row["bootstrap_coef_ci_lo"]),
+            float(row["bootstrap_coef_ci_hi"]),
+            2,
+        ),
+        axis=1,
+    )
+    part1_df["Predictor_Display"] = part1_df["predictor"].astype(str)
+    return part1_df
+
+
+def build_publication_tables(
+    ranked_models: pd.DataFrame,
+    scenario_df: pd.DataFrame,
+    part1_df: pd.DataFrame,
+    *,
+    stability_threshold: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    perf_rows: list[dict] = []
+    for _, model_row in ranked_models.iterrows():
+        row = {
+            "Rank": int(model_row["Overall_Rank"]),
+            "Acronym": model_row["Acronym"],
+            "Model": model_row["Model_label"],
+            "Publication name": model_row["Publication_Name"],
+            "Input vars": int(model_row["Input_vars"]),
+        }
+        model_slice = scenario_df[scenario_df["Model_label"] == model_row["Model_label"]]
+        for scenario_name, prefix in [("Best", "Best"), ("Worst", "Worst")]:
+            scenario_match = model_slice[model_slice["Scenario"] == scenario_name].iloc[0]
+            row[f"{prefix} Acc [95% CI]"] = fmt_pct_ci(
+                float(scenario_match["Accuracy"]),
+                float(scenario_match["Accuracy_CI_lo"]),
+                float(scenario_match["Accuracy_CI_hi"]),
+            )
+            row[f"{prefix} BalAcc [95% CI]"] = fmt_pct_ci(
+                float(scenario_match["Balanced_Accuracy"]),
+                float(scenario_match["Balanced_Accuracy_CI_lo"]),
+                float(scenario_match["Balanced_Accuracy_CI_hi"]),
+            )
+            row[f"{prefix} Se [95% CI]"] = fmt_pct_ci(
+                float(scenario_match["Sensitivity"]),
+                float(scenario_match["Sensitivity_CI_lo"]),
+                float(scenario_match["Sensitivity_CI_hi"]),
+            )
+            row[f"{prefix} Sp [95% CI]"] = fmt_pct_ci(
+                float(scenario_match["Specificity"]),
+                float(scenario_match["Specificity_CI_lo"]),
+                float(scenario_match["Specificity_CI_hi"]),
+            )
+        perf_rows.append(row)
+    panel_a = pd.DataFrame(perf_rows)
+
+    stable = part1_df[part1_df["selection_frequency"] >= stability_threshold].copy()
+    stable["Model_Column"] = stable.apply(
+        lambda row: f"{row['Acronym']} ({row['Model_label']}; {int(row['Input_vars'])} vars)",
+        axis=1,
+    )
+    stable["Cell"] = stable.apply(
+        lambda row: (
+            f"{float(row['bootstrap_coef_mean']):+.2f} "
+            f"({float(row['bootstrap_coef_sd']):.2f}) "
+            f"[{float(row['bootstrap_coef_ci_lo']):.2f}, {float(row['bootstrap_coef_ci_hi']):.2f}]; "
+            f"{row['Selection_Freq_Pct']}"
+        ),
+        axis=1,
+    )
+    predictor_order = (
+        stable.groupby("Predictor_Display", as_index=False)
+        .agg(
+            Model_Count=("Model_label", "nunique"),
+            Max_SF=("selection_frequency", "max"),
+            Max_Abs=("abs_bootstrap_coef_mean", "max"),
+        )
+        .sort_values(["Model_Count", "Max_SF", "Max_Abs", "Predictor_Display"], ascending=[False, False, False, True])
+    )
+    column_order = [
+        f"{row['Acronym']} ({row['Model_label']}; {int(row['Input_vars'])} vars)"
+        for _, row in ranked_models.iterrows()
+    ]
+    panel_b = (
+        stable.pivot_table(index="Predictor_Display", columns="Model_Column", values="Cell", aggfunc="first")
+        .reindex(predictor_order["Predictor_Display"].tolist())
+        .reindex(columns=column_order)
+        .reset_index()
+        .rename(columns={"Predictor_Display": "Predictor"})
+        .fillna("—")
+    )
+
+    table2 = (
+        stable[[
+            "Overall_Rank", "Acronym", "Model_label", "Publication_Name", "Input_vars", "Predictor_Display",
+            "base_coef", "bootstrap_coef_mean", "bootstrap_coef_sd", "bootstrap_coef_ci_lo",
+            "bootstrap_coef_ci_hi", "Selection_Freq_Pct",
+        ]]
+        .rename(columns={
+            "Overall_Rank": "Rank",
+            "Publication_Name": "Publication name",
+            "Input_vars": "Input vars",
+            "Predictor_Display": "Predictor",
+            "base_coef": "Full-fit Coef",
+            "bootstrap_coef_mean": "Boot Mean Coef",
+            "bootstrap_coef_sd": "Boot SD",
+            "bootstrap_coef_ci_lo": "CI lo",
+            "bootstrap_coef_ci_hi": "CI hi",
+            "Selection_Freq_Pct": "Sel Freq",
+        })
+        .sort_values(["Rank", "Acronym", "Predictor"])
+        .reset_index(drop=True)
+    )
+    table2["95% CI"] = table2.apply(
+        lambda row: f"[{float(row['CI lo']):.2f}, {float(row['CI hi']):.2f}]",
+        axis=1,
+    )
+    table2["Full-fit Coef"] = table2["Full-fit Coef"].map(lambda x: f"{float(x):+.2f}")
+    table2["Boot Mean Coef"] = table2["Boot Mean Coef"].map(lambda x: f"{float(x):+.2f}")
+    table2["Boot SD"] = table2["Boot SD"].map(lambda x: f"{float(x):.2f}")
+    table2 = table2[[
+        "Rank", "Acronym", "Model_label", "Publication name", "Input vars",
+        "Predictor", "Full-fit Coef", "Boot Mean Coef", "Boot SD", "95% CI", "Sel Freq",
+    ]]
+    return panel_a, panel_b, table2
+
+
+def build_outputs(source) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     predictions_df = pd.read_excel(SOURCE_XLSX, sheet_name="Predictions")
     lasso_summary = pd.read_excel(SOURCE_XLSX, sheet_name="LASSO_Summary")
     ipcw_summary = pd.read_excel(SOURCE_XLSX, sheet_name="IPCW_Summary")
@@ -438,6 +639,7 @@ def build_outputs(source) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.
     ).reset_index(drop=True)
     leaderboard_df = pd.concat(leaderboard_rows, ignore_index=True)
     coefficients_df = pd.concat(coefficient_frames, ignore_index=True)
+    part1_coefficients_df = build_part1_coefficients(source, ranked_models)
     explainers_df = ranked_models[[
         "Overall_Rank",
         "Model_label",
@@ -452,76 +654,126 @@ def build_outputs(source) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.
         "Weighted_OOF_R2",
         "Weighted_OOF_MAE",
     ]].copy()
-    return ranked_models, scenario_df, leaderboard_df, explainers_df, coefficients_df, predictions_df
+    panel_a_df, panel_b_df, table2_df = build_publication_tables(
+        ranked_models,
+        scenario_df,
+        part1_coefficients_df,
+        stability_threshold=source.STABILITY_THRESHOLD,
+    )
+    return (
+        ranked_models,
+        scenario_df,
+        leaderboard_df,
+        explainers_df,
+        coefficients_df,
+        part1_coefficients_df,
+        panel_a_df,
+        panel_b_df,
+        table2_df,
+    )
 
 
 def write_excel(ranked_models: pd.DataFrame, scenario_df: pd.DataFrame,
                 leaderboard_df: pd.DataFrame, explainers_df: pd.DataFrame,
-                coefficients_df: pd.DataFrame) -> None:
+                coefficients_df: pd.DataFrame, part1_coefficients_df: pd.DataFrame,
+                panel_a_df: pd.DataFrame, panel_b_df: pd.DataFrame,
+                table2_df: pd.DataFrame) -> None:
     with pd.ExcelWriter(OUTPUT_XLSX, engine="openpyxl") as writer:
         ranked_models.to_excel(writer, sheet_name="Model_Ranking", index=False)
         scenario_df.to_excel(writer, sheet_name="Scenario_Performance", index=False)
         leaderboard_df.to_excel(writer, sheet_name="Binary_Leaderboards", index=False)
         explainers_df.to_excel(writer, sheet_name="Model_Explainers", index=False)
         coefficients_df.to_excel(writer, sheet_name="Logistic_Coefficients", index=False)
+        part1_coefficients_df.to_excel(writer, sheet_name="LASSO_Coefficients", index=False)
+        panel_a_df.to_excel(writer, sheet_name="Pub_Table1_PanelA", index=False)
+        panel_b_df.to_excel(writer, sheet_name="Pub_Table1_PanelB", index=False)
+        table2_df.to_excel(writer, sheet_name="Pub_Table2", index=False)
 
 
-def table1_rows(scenario_df: pd.DataFrame) -> list[list[str]]:
-    rows = [[
-        "Rank",
-        "Acronym",
-        "Publication-style model name",
-        "Source model",
-        "Predictor summary",
-        "Scenario",
-        "Youden cutpoint [95% CI]",
-        "Sensitivity [95% CI]",
-        "Specificity [95% CI]",
-        "Balanced accuracy [95% CI]",
-        "Accuracy [95% CI]",
-    ]]
-    for _, row in scenario_df.iterrows():
-        rows.append([
-            str(int(row["Overall_Rank"])),
-            row["Acronym"],
-            row["Publication_Name"],
-            row["Model_label"],
-            f"{int(row['Predictor_count'])} vars; {row['Predictor_categories_summary']}",
-            row["Scenario"],
-            fmt_ci(row["Youden_threshold"], row["Threshold_CI_lo"], row["Threshold_CI_hi"], 3),
-            fmt_ci(row["Sensitivity"], row["Sensitivity_CI_lo"], row["Sensitivity_CI_hi"], 3),
-            fmt_ci(row["Specificity"], row["Specificity_CI_lo"], row["Specificity_CI_hi"], 3),
-            fmt_ci(row["Balanced_Accuracy"], row["Balanced_Accuracy_CI_lo"], row["Balanced_Accuracy_CI_hi"], 3),
-            fmt_ci(row["Accuracy"], row["Accuracy_CI_lo"], row["Accuracy_CI_hi"], 3),
-        ])
+def write_publication_files(panel_a_df: pd.DataFrame, panel_b_df: pd.DataFrame, table2_df: pd.DataFrame) -> None:
+    panel_a_df.to_csv(OUTPUT_PANEL_A_CSV, index=False)
+    panel_b_df.to_csv(OUTPUT_PANEL_B_CSV, index=False)
+    table2_df.to_csv(OUTPUT_TABLE2_CSV, index=False)
+
+    markdown_parts = [
+        "## Table 1. Retained 20260909 models: binary performance and stable Part 1 predictors",
+        "",
+        "### Panel A. Part 2 IPCW binary classification performance",
+        "",
+        dataframe_to_markdown(panel_a_df),
+        "",
+        "### Panel B. Part 1 stable bootstrap LASSO coefficients (selection frequency ≥70%)",
+        "",
+        dataframe_to_markdown(panel_b_df),
+        "",
+        "## Table 2. Detailed stable Part 1 coefficients",
+        "",
+        dataframe_to_markdown(table2_df),
+        "",
+        "*β values are standardized bootstrap LASSO coefficients. In Panel B, cells are shown as Boot Mean Coef (Boot SD) [95% CI]; selection frequency.*",
+        "*Acc = accuracy; BalAcc = balanced accuracy; Se = sensitivity; Sp = specificity; CI = 95% bootstrap confidence interval.*",
+    ]
+    OUTPUT_PUBLICATION_MD.write_text("\n".join(markdown_parts), encoding="utf-8")
+
+    latex_parts = [
+        "% Table 1, Panel A",
+        panel_a_df.to_latex(index=False),
+        "",
+        "% Table 1, Panel B",
+        panel_b_df.to_latex(index=False),
+        "",
+        "% Table 2",
+        table2_df.to_latex(index=False),
+        "",
+    ]
+    OUTPUT_PUBLICATION_TEX.write_text("\n".join(latex_parts), encoding="utf-8")
+
+
+def dataframe_to_rows(df: pd.DataFrame) -> list[list[str]]:
+    rows = [list(df.columns)]
+    rows.extend(df.fillna("—").astype(str).values.tolist())
     return rows
 
 
-def write_table1_docx(scenario_df: pd.DataFrame) -> None:
+def write_table1_docx(panel_a_df: pd.DataFrame, panel_b_df: pd.DataFrame) -> None:
     doc = Document()
     ensure_landscape(doc)
     title = doc.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    run = title.add_run("Table 1. Retained five-model stroke PAC summary with scenario-specific Youden cutpoints")
+    run = title.add_run("Table 1. Retained 20260909 stroke PAC models: binary performance and stable Part 1 predictors")
     run.bold = True
     run.font.size = Pt(11)
 
     subtitle = doc.add_paragraph(
-        "Cohort: post-acute care stroke rehabilitation patients transferred from the neurology ward; "
-        "stroke topology, comorbidities, complications, and NIHSS were recorded acutely, and discharge-to-PAC "
-        "functional assessments included gait speed and the 6-minute walk test."
+        "Panel A summarizes Part 2 IPCW binary classification performance across the retained 20260909 models. "
+        "Panel B shows Part 1 stable bootstrap LASSO coefficients carried forward from the retained 20260904 models, "
+        "using the same 20260909 ranks, model labels, publication names, and acronyms."
     )
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
     for run in subtitle.runs:
         run.font.size = Pt(8)
 
-    add_styled_table(doc, table1_rows(scenario_df), font_size=7, landscape=True)
+    add_styled_table(
+        doc,
+        dataframe_to_rows(panel_a_df),
+        title="Panel A. Part 2 IPCW binary classification performance",
+        font_size=7,
+        landscape=True,
+    )
+    add_styled_table(
+        doc,
+        dataframe_to_rows(panel_b_df),
+        title="Panel B. Part 1 stable bootstrap LASSO coefficients (selection frequency ≥70%)",
+        font_size=7,
+        landscape=True,
+    )
     legend = doc.add_paragraph()
     legend.add_run("Abbreviations. ").bold = True
     legend.add_run(
         "PAC = post-acute care; IPCW = inverse probability of completion weighting; "
-        "OOF = out-of-fold; CI = percentile bootstrap 95% confidence interval from 2,000 resamples of paired OOF "
-        "probabilities and observed binary outcomes; the Youden cutpoint maximized sensitivity + specificity - 1."
+        "CI = percentile bootstrap 95% confidence interval; Se = sensitivity; Sp = specificity; "
+        "BalAcc = balanced accuracy; NIHSS = National Institutes of Health Stroke Scale. "
+        "Panel B cells are formatted as Boot Mean Coef (Boot SD) [95% CI]; selection frequency."
     )
     for run in legend.runs:
         run.font.size = Pt(8)
@@ -529,7 +781,8 @@ def write_table1_docx(scenario_df: pd.DataFrame) -> None:
 
 
 def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFrame,
-                             coefficients_df: pd.DataFrame) -> None:
+                             coefficients_df: pd.DataFrame, part1_coefficients_df: pd.DataFrame,
+                             panel_a_df: pd.DataFrame, panel_b_df: pd.DataFrame) -> None:
     doc = Document()
     title = doc.add_paragraph()
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -547,10 +800,12 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
         run.font.size = Pt(9)
 
     methods = doc.add_paragraph(
+        "Part 1 stable predictor summaries were re-derived from the retained 20260904 bootstrap LASSO models so that "
+        "all tables inherit the 20260909 ranks, model labels, publication names, and acronyms. "
         "Part 2 logistic-regression classifiers were re-evaluated using out-of-fold predicted probabilities. "
-        "For each retained model and each scenario (Best and Worst), a Youden-optimal "
-        "cutpoint was then derived from the out-of-fold ROC curve, and bootstrap percentile confidence intervals "
-        "around the cutpoint and its operating characteristics were estimated from 2,000 resamples."
+        "For each retained model and each scenario (Best and Worst), a Youden-optimal cutpoint was then derived from "
+        "the out-of-fold ROC curve, and bootstrap percentile confidence intervals around the cutpoint and its "
+        "operating characteristics were estimated from 2,000 resamples."
     )
     for run in methods.runs:
         run.font.size = Pt(9)
@@ -572,6 +827,20 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
             fmt_num(row["Weighted_OOF_MAE"], 1),
         ])
     add_styled_table(doc, ranking_rows, title="Overall ranking of the retained five models", font_size=8)
+    add_styled_table(
+        doc,
+        dataframe_to_rows(panel_a_df),
+        title="Publication-ready summary: Part 2 IPCW binary performance",
+        font_size=7,
+        landscape=True,
+    )
+    add_styled_table(
+        doc,
+        dataframe_to_rows(panel_b_df),
+        title="Publication-ready summary: Part 1 stable bootstrap LASSO coefficients",
+        font_size=7,
+        landscape=True,
+    )
 
     for scenario_name in SCENARIO_ORDER:
         scenario_rows = [[
@@ -619,6 +888,36 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
             for run in paragraph.runs:
                 run.font.size = Pt(9)
 
+        model_part1 = (
+            part1_coefficients_df[
+                (part1_coefficients_df["Model_label"] == row["Model_label"])
+                & (part1_coefficients_df["Stable"])
+            ]
+            .sort_values(["selection_frequency", "abs_bootstrap_coef_mean"], ascending=[False, False])
+            .reset_index(drop=True)
+        )
+        part1_rows = [[
+            "Predictor", "Full-fit Coef", "Boot Mean Coef", "Boot SD", "95% CI", "Selection Freq",
+        ]]
+        for _, coef_row in model_part1.iterrows():
+            part1_rows.append([
+                coef_row["Predictor_Display"],
+                f"{float(coef_row['base_coef']):+.4f}",
+                f"{float(coef_row['bootstrap_coef_mean']):+.4f}",
+                f"{float(coef_row['bootstrap_coef_sd']):.4f}",
+                f"[{float(coef_row['bootstrap_coef_ci_lo']):+.4f}, {float(coef_row['bootstrap_coef_ci_hi']):+.4f}]",
+                coef_row["Selection_Freq_Pct"],
+            ])
+        if len(part1_rows) == 1:
+            part1_rows.append(["None met stability threshold", "—", "—", "—", "—", "—"])
+        add_styled_table(
+            doc,
+            part1_rows,
+            title="Part 1 stable bootstrap LASSO coefficients (selection frequency ≥70%)",
+            font_size=8,
+            landscape=True,
+        )
+
         this_model = scenario_df[scenario_df["Model_label"] == row["Model_label"]]
         op_rows = [[
             "Scenario", "Cutpoint [95% CI]", "Se [95% CI]",
@@ -658,7 +957,8 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
 
     reproducibility = doc.add_paragraph(
         "Reproducibility: run `python 20260909_Comprehensive.py` from the repository root clone to regenerate "
-        "20260909_Comprehensive.docx, 20260909_Comprehensive.xlsx, and 20260909_Table1_2016.docx."
+        "20260909_Comprehensive.docx, 20260909_Comprehensive.xlsx, 20260909_Table1_2016.docx, "
+        "20260909_Publication_Tables.md, and 20260909_Publication_Tables.tex."
     )
     for run in reproducibility.runs:
         run.font.size = Pt(8)
@@ -672,14 +972,44 @@ def main() -> None:
         raise FileNotFoundError(f"Missing source workbook: {SOURCE_XLSX}")
 
     source = load_source_module()
-    ranked_models, scenario_df, leaderboard_df, explainers_df, coefficients_df, _ = build_outputs(source)
-    write_excel(ranked_models, scenario_df, leaderboard_df, explainers_df, coefficients_df)
-    write_table1_docx(scenario_df)
-    write_comprehensive_docx(ranked_models, scenario_df, coefficients_df)
+    (
+        ranked_models,
+        scenario_df,
+        leaderboard_df,
+        explainers_df,
+        coefficients_df,
+        part1_coefficients_df,
+        panel_a_df,
+        panel_b_df,
+        table2_df,
+    ) = build_outputs(source)
+    write_excel(
+        ranked_models,
+        scenario_df,
+        leaderboard_df,
+        explainers_df,
+        coefficients_df,
+        part1_coefficients_df,
+        panel_a_df,
+        panel_b_df,
+        table2_df,
+    )
+    write_publication_files(panel_a_df, panel_b_df, table2_df)
+    write_table1_docx(panel_a_df, panel_b_df)
+    write_comprehensive_docx(
+        ranked_models,
+        scenario_df,
+        coefficients_df,
+        part1_coefficients_df,
+        panel_a_df,
+        panel_b_df,
+    )
 
     print(f"Saved: {OUTPUT_XLSX.name}")
     print(f"Saved: {OUTPUT_TABLE1.name}")
     print(f"Saved: {OUTPUT_DOCX.name}")
+    print(f"Saved: {OUTPUT_PUBLICATION_MD.name}")
+    print(f"Saved: {OUTPUT_PUBLICATION_TEX.name}")
 
 
 if __name__ == "__main__":
