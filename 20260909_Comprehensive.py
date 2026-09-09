@@ -211,6 +211,29 @@ def dataframe_to_markdown(df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
+def dataframe_to_latex(df: pd.DataFrame) -> str:
+    def esc(value: str) -> str:
+        return (
+            value.replace("\\", "\\textbackslash{}")
+            .replace("&", "\\&")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+            .replace("#", "\\#")
+        )
+
+    headers = [esc(str(col)) for col in df.columns]
+    lines = [
+        "\\begin{tabular}{" + "l" * len(headers) + "}",
+        "\\hline",
+        " & ".join(headers) + " \\\\",
+        "\\hline",
+    ]
+    for row in df.fillna("—").astype(str).values.tolist():
+        lines.append(" & ".join(esc(value) for value in row) + " \\\\")
+    lines.extend(["\\hline", "\\end{tabular}"])
+    return "\n".join(lines)
+
+
 def evaluate_threshold(y_true: np.ndarray, scores: np.ndarray, threshold: float) -> dict[str, float]:
     y_pred = (scores >= threshold).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred, labels=[0, 1]).ravel()
@@ -717,13 +740,13 @@ def write_publication_files(panel_a_df: pd.DataFrame, panel_b_df: pd.DataFrame, 
 
     latex_parts = [
         "% Table 1, Panel A",
-        panel_a_df.to_latex(index=False),
+        dataframe_to_latex(panel_a_df),
         "",
         "% Table 1, Panel B",
-        panel_b_df.to_latex(index=False),
+        dataframe_to_latex(panel_b_df),
         "",
         "% Table 2",
-        table2_df.to_latex(index=False),
+        dataframe_to_latex(table2_df),
         "",
     ]
     OUTPUT_PUBLICATION_TEX.write_text("\n".join(latex_parts), encoding="utf-8")
