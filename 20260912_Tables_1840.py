@@ -108,20 +108,22 @@ def build_compact_performance_table(model_explainers: pd.DataFrame, panel_a: pd.
             return "—"
         return f"{float(value):.{digits}f}"
 
+    explainers_by_rank = model_explainers[
+        [
+            "Overall_Rank",
+            "CV_R2",
+            "CV_MAE",
+            "Weighted_OOF_R2",
+            "Weighted_OOF_MAE",
+        ]
+    ].drop_duplicates(subset=["Overall_Rank"])
+
     merged = panel_a.merge(
-        model_explainers[
-            [
-                "Overall_Rank",
-                "CV_R2",
-                "CV_MAE",
-                "Weighted_OOF_R2",
-                "Weighted_OOF_MAE",
-            ]
-        ],
+        explainers_by_rank,
         left_on="Rank",
         right_on="Overall_Rank",
         how="left",
-        validate="one_to_one",
+        validate="many_to_one",
     )
     compact = merged[
         [
@@ -146,10 +148,14 @@ def build_compact_performance_table(model_explainers: pd.DataFrame, panel_a: pd.
         },
         inplace=True,
     )
-    compact["Part 1 CV R²"] = compact["Part 1 CV R²"].map(lambda x: fmt_or_dash(x, 4))
-    compact["Part 1 MAE (m)"] = compact["Part 1 MAE (m)"].map(lambda x: fmt_or_dash(x, 2))
-    compact["Part 2 weighted OOF R²"] = compact["Part 2 weighted OOF R²"].map(lambda x: fmt_or_dash(x, 4))
-    compact["Part 2 weighted OOF MAE (m)"] = compact["Part 2 weighted OOF MAE (m)"].map(lambda x: fmt_or_dash(x, 1))
+    metric_formats = {
+        "Part 1 CV R²": 4,
+        "Part 1 MAE (m)": 2,
+        "Part 2 weighted OOF R²": 4,
+        "Part 2 weighted OOF MAE (m)": 1,
+    }
+    for column_name, digits in metric_formats.items():
+        compact[column_name] = compact[column_name].map(lambda x, digits=digits: fmt_or_dash(x, digits))
     return compact
 
 
@@ -171,14 +177,15 @@ def build_compact_predictor_table(model_explainers: pd.DataFrame, lasso_coeffici
     )
 
     stable = stable[stable["Predictor_Display"].isin(keep_predictors["Predictor_Display"])].copy()
-    stable["Model_Column"] = stable.apply(
-        lambda row: f"{int(row['Overall_Rank'])}. {row['Acronym']} (n={int(row['Input_vars'])})",
-        axis=1,
+    stable["Model_Column"] = (
+        stable["Overall_Rank"].astype(int).astype(str)
+        + ". "
+        + stable["Acronym"].astype(str)
+        + " (n="
+        + stable["Input_vars"].astype(int).astype(str)
+        + ")"
     )
-    stable["Cell"] = stable.apply(
-        lambda row: f"{float(row['bootstrap_coef_mean']):+.1f}; {row['Selection_Freq_Pct']}",
-        axis=1,
-    )
+    stable["Cell"] = stable["bootstrap_coef_mean"].map(lambda value: f"{float(value):+.1f}") + "; " + stable["Selection_Freq_Pct"].astype(str)
 
     column_order = [
         f"{int(row['Overall_Rank'])}. {row['Acronym']} (n={int(row['Input_vars'])})"
@@ -196,11 +203,12 @@ def build_compact_predictor_table(model_explainers: pd.DataFrame, lasso_coeffici
 
 
 def load_tables() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    model_explainers = pd.read_excel(SOURCE_XLSX, sheet_name="Model_Explainers").sort_values("Overall_Rank")
-    panel_a = pd.read_excel(SOURCE_XLSX, sheet_name="Pub_Table1_PanelA")
-    panel_b = pd.read_excel(SOURCE_XLSX, sheet_name="Pub_Table1_PanelB")
-    table2 = pd.read_excel(SOURCE_XLSX, sheet_name="Pub_Table2")
-    lasso_coefficients = pd.read_excel(SOURCE_XLSX, sheet_name="LASSO_Coefficients")
+    with pd.ExcelFile(SOURCE_XLSX) as workbook:
+        model_explainers = workbook.parse("Model_Explainers").sort_values("Overall_Rank")
+        panel_a = workbook.parse("Pub_Table1_PanelA")
+        panel_b = workbook.parse("Pub_Table1_PanelB")
+        table2 = workbook.parse("Pub_Table2")
+        lasso_coefficients = workbook.parse("LASSO_Coefficients")
     return model_explainers, panel_a, panel_b, table2, lasso_coefficients
 
 
