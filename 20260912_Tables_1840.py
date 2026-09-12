@@ -319,15 +319,6 @@ def build_compact_predictor_table(model_explainers: pd.DataFrame, lasso_coeffici
 
 def compute_continuous_calibration(source, model_explainers: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     predictions_df = pd.read_excel(SOURCE_COMPREHENSIVE_XLSX, sheet_name="Predictions")
-    ipcw = source.compute_ipcw_weights_single_model(predictions_df, source.IPCW_COMPLETION_FEATURES)
-    completer_mask = (
-        predictions_df["PAC_Program_Completion"].astype("string").eq("Completed PAC program")
-        & predictions_df["6MWT4"].notna()
-    )
-    df_comp = predictions_df.loc[completer_mask].copy()
-    y = df_comp["6MWT4"].to_numpy(dtype=float)
-    weights = ipcw["weights"].loc[completer_mask].fillna(1.0).to_numpy(dtype=float)
-
     rows: list[dict] = []
     decile_data: dict[str, pd.DataFrame] = {}
     explainers_by_model = model_explainers.set_index("Model_label")
@@ -335,21 +326,20 @@ def compute_continuous_calibration(source, model_explainers: pd.DataFrame) -> tu
     for model_name in source.RETAINED_MODEL_ORDER:
         model_label = model_name.split(":", 1)[0]
         explainer = explainers_by_model.loc[model_label]
-        valid_features = source._filter_existing(source.MODEL_SPECS[model_name], predictions_df)
-        X_raw = df_comp[valid_features]
-        cv_splits = list(KFold(n_splits=source.CV_FOLDS, shuffle=True, random_state=source.RANDOM_STATE).split(X_raw))
-        oof = np.zeros(len(df_comp), dtype=float)
+        pred_col = source.MODEL_PRED_COLS[model_name]
+        if model_name.startswith("Model 5:"):
+            model_df = predictions_df[
+                predictions_df["6MWT4"].notna() & predictions_df["Rehab_LOS_Category"].isin(source.QUALIFYING_REHAB_LOS)
+            ].copy()
+        else:
+            model_df = predictions_df[predictions_df["6MWT4"].notna()].copy()
+        model_df = model_df[[pred_col, "6MWT4"]].dropna().copy()
+        y = model_df["6MWT4"].to_numpy(dtype=float)
+        oof = model_df[pred_col].to_numpy(dtype=float)
+        weights = np.ones(len(model_df), dtype=float)
 
-        for tr, te in cv_splits:
-            imputer = SimpleImputer(strategy="median")
-            X_tr = imputer.fit_transform(X_raw.iloc[tr])
-            X_te = imputer.transform(X_raw.iloc[te])
-            model = Ridge(alpha=1.0)
-            model.fit(X_tr, y[tr], sample_weight=weights[tr])
-            oof[te] = np.maximum(0, model.predict(X_te))
-
-        predicted_mean = weighted_mean(oof, weights)
-        observed_mean = weighted_mean(y, weights)
+        predicted_mean = float(np.mean(oof))
+        observed_mean = float(np.mean(y))
         centered_pred = oof - predicted_mean
         slope_model = sm.WLS(y - observed_mean, centered_pred, weights=weights).fit()
         order = np.argsort(oof)
@@ -409,7 +399,7 @@ def save_calibration_plot(decile_data: dict[str, pd.DataFrame]) -> None:
     for ax in axes_flat[len(ordered_items):]:
         ax.axis("off")
 
-    fig.suptitle("Internal weighted OOF calibration by clinically ordered retained model", fontsize=12)
+    fig.suptitle("Internal OOF calibration by clinically ordered retained model", fontsize=12)
     fig.tight_layout()
     fig.savefig(OUTPUT_CALIBRATION_PNG, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -421,10 +411,10 @@ def build_parsimony_table(
     lasso_coefficients: pd.DataFrame,
     calibration_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    merged = ranking_df.copy()
+    merged = ranking_df.drop_duplicates(subset=["Model_label"]).copy()
     merged = merged.merge(
-        calibration_df[["Acronym", "Calibration_Slope", "Calibration_Intercept"]],
-        on="Acronym",
+        calibration_df[["Model_label", "Calibration_Slope", "Calibration_Intercept"]],
+        on="Model_label",
         how="left",
         validate="one_to_one",
     )
@@ -483,7 +473,8 @@ def build_mcid_table(model_explainers: pd.DataFrame) -> pd.DataFrame:
     rows = []
     low_benchmark = min(MCID_BENCHMARKS_M)
     high_benchmark = max(MCID_BENCHMARKS_M)
-    for row in model_explainers.sort_values(["Acronym"], key=lambda s: s.map(order_key)).itertuples(index=False):
+    unique_models = model_explainers.drop_duplicates(subset=["Model_label"]).copy()
+    for row in sort_by_presentation(unique_models).itertuples(index=False):
         mae = float(row.Weighted_OOF_MAE)
         rows.append(
             {
@@ -547,7 +538,7 @@ def write_main_document(compact_performance: pd.DataFrame, compact_predictors: p
         doc,
         compact_performance,
         title="Table 1. Clinically ordered comparison of the 5 retained models",
-        note="Rows are intentionally ordered by clinical parsimony. Calibration metrics are from weighted out-of-fold predictions among completers; balanced accuracy is still shown for the Best and Worst non-completer walking scenarios.",
+        note="Rows are intentionally ordered by clinical parsimony. Calibration metrics are derived from the original Part 1 out-of-fold 6MWT4 predictions, while balanced accuracy is still shown for the Best and Worst non-completer walking scenarios.",
         font_size=7,
     )
     add_table(
@@ -631,8 +622,8 @@ def write_supplementary_document(
                 "Weighted_OOF_MAE": "Weighted OOF MAE (m)",
             }
         ),
-        title="Supplementary Table S3. Internal weighted OOF calibration summary",
-        note="Calibration intercept is the weighted mean observed-minus-predicted difference (ideal 0 m), and calibration slope is the centered weighted recalibration slope (ideal 1.0) among completers.",
+        title="Supplementary Table S3. Internal OOF calibration summary",
+        note="Calibration intercept is the mean observed-minus-predicted difference (ideal 0 m), and calibration slope is the centered recalibration slope (ideal 1.0) from the original Part 1 out-of-fold 6MWT4 predictions.",
         font_size=7,
     )
 
@@ -722,7 +713,7 @@ def write_narrative_documents(
 
     methods_doc = Document()
     methods_doc.add_paragraph(
-        "For publication-facing tables, retained models were reframed as statistically comparable rather than definitively rank ordered. The clinically parsimonious presentation now leads with BEDSIDE (4 variables) and AIMS (12 variables), while the original point-estimate ordering is preserved only as a supplementary reference. Continuous-model calibration was added by refitting the retained IPCW-weighted Ridge models with the original 5-fold out-of-fold procedure among completers, then estimating calibration intercept and slope from weighted linear recalibration of observed 6MWT4 on out-of-fold predictions. Decile-based calibration plots were generated for each retained model. To address overfitting concerns, we report outcome observations per variable together with stable-predictor frequency bands and model-unique stable predictors for the larger COMPASS and CASCADE models. Clinical interpretability was strengthened by benchmarking weighted out-of-fold MAE against previously used stroke-relevant 6MWT MCID anchors (20.0 m and 34.4 m) and by adding correlation/VIF diagnostics for BBS1, Gait_Speed_1, Age, and FuglUE1. No temporally or geographically distinct external validation cohort was available, so the revised documents now state explicitly that internal cross-validation and weighted out-of-fold estimates do not substitute for external validation before final model selection."
+        "For publication-facing tables, retained models were reframed as statistically comparable rather than definitively rank ordered. The clinically parsimonious presentation now leads with BEDSIDE (4 variables) and AIMS (12 variables), while the original point-estimate ordering is preserved only as a supplementary reference. Continuous-model calibration was added by reusing the original Part 1 out-of-fold 6MWT4 predictions already stored for each retained LASSO model, then estimating calibration intercept and slope from mean-centered linear recalibration of observed 6MWT4 on those out-of-fold predictions. Decile-based calibration plots were generated for each retained model. To address overfitting concerns, we report outcome observations per variable together with stable-predictor frequency bands and model-unique stable predictors for the larger COMPASS and CASCADE models. Clinical interpretability was strengthened by benchmarking weighted out-of-fold MAE against previously used stroke-relevant 6MWT MCID anchors (20.0 m and 34.4 m) and by adding correlation/VIF diagnostics for BBS1, Gait_Speed_1, Age, and FuglUE1. No temporally or geographically distinct external validation cohort was available, so the revised documents now state explicitly that internal cross-validation and weighted out-of-fold estimates do not substitute for external validation before final model selection."
     )
     methods_doc.save(OUTPUT_METHODS)
 

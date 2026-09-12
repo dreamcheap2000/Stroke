@@ -144,6 +144,48 @@ class Tables1840Tests(unittest.TestCase):
         self.assertEqual(result.loc[0, "Δ vs RESTORE R²"], "—")
         self.assertEqual(result.loc[0, "Δ vs RESTORE MAE (m)"], "—")
 
+    def test_build_compact_performance_table_leaves_unmatched_metadata_blank(self):
+        model_explainers = pd.DataFrame(
+            [
+                {
+                    "Overall_Rank": 1,
+                    "Model_label": "Model 5",
+                    "Acronym": "RESTORE",
+                    "Publication_Name": "Expected Name",
+                    "Input_vars": 21,
+                    "CV_R2": 0.54321,
+                    "CV_MAE": 89.285,
+                    "Weighted_OOF_R2": 0.51234,
+                    "Weighted_OOF_MAE": 90.44,
+                }
+            ]
+        )
+        panel_a = pd.DataFrame(
+            [
+                {
+                    "Rank": 1,
+                    "Acronym": "RESTORE",
+                    "Model": "Model 5",
+                    "Publication name": "Wrong Name",
+                    "Input vars": 21,
+                    "Best BalAcc [95% CI]": "80.0% [70.0, 90.0]",
+                    "Worst BalAcc [95% CI]": "78.0% [68.0, 88.0]",
+                }
+            ]
+        )
+        calibration = pd.DataFrame(
+            [
+                {"Model_label": "Model 5", "Acronym": "RESTORE", "Calibration_Intercept": 1.0, "Calibration_Slope": 0.95},
+            ]
+        )
+
+        result = tables_1840.build_compact_performance_table(model_explainers, panel_a, calibration)
+
+        self.assertEqual(result.loc[0, "Part 1 CV R²"], "—")
+        self.assertEqual(result.loc[0, "Part 2 weighted OOF MAE (m)"], "—")
+        self.assertEqual(result.loc[0, "Calibration intercept (m)"], "1.0")
+        self.assertEqual(result.loc[0, "Best BalAcc [95% CI]"], "80.0% [70.0, 90.0]")
+
     def test_build_compact_predictor_table_keeps_shared_predictors_only_and_reorders_models(self):
         model_explainers = pd.DataFrame(
             [
