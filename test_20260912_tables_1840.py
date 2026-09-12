@@ -103,9 +103,9 @@ class Tables1840Tests(unittest.TestCase):
         model_explainers = pd.DataFrame(
             [
                 {
-                    "Overall_Rank": 4,
-                    "Model_label": "Model 1",
-                    "Acronym": "AIMS",
+                    "Overall_Rank": 6,
+                    "Model_label": "Model 99",
+                    "Acronym": "ZETA",
                     "Publication_Name": "Model Two",
                     "Input_vars": 12,
                     "CV_R2": 0.49001,
@@ -118,8 +118,8 @@ class Tables1840Tests(unittest.TestCase):
         panel_a = pd.DataFrame(
             [
                 {
-                    "Rank": 4,
-                    "Acronym": "AIMS",
+                    "Rank": 6,
+                    "Acronym": "ZETA",
                     "Publication name": "Model Two",
                     "Input vars": 12,
                     "Best BalAcc [95% CI]": "75.0% [65.0, 85.0]",
@@ -130,6 +130,7 @@ class Tables1840Tests(unittest.TestCase):
 
         result = tables_1840.build_compact_performance_table(model_explainers, panel_a)
 
+        self.assertEqual(result.loc[0, "Clinical role"], "Additional comparison")
         self.assertEqual(result.loc[0, "Δ vs RESTORE R²"], "—")
         self.assertEqual(result.loc[0, "Δ vs RESTORE MAE (m)"], "—")
 

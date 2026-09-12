@@ -45,6 +45,7 @@ CLINICAL_ROLE = {
     "COMPASS": "Complexity-sensitive comparison",
     "CASCADE": "Complexity-sensitive comparison",
 }
+DEFAULT_CLINICAL_ROLE = "Additional comparison"
 MCID_BENCHMARKS_M = [20.0, 34.4]
 COLLINEARITY_VARIABLES = ["BBS1", "Gait_Speed_1", "Age", "FuglUE1"]
 
@@ -213,7 +214,7 @@ def build_compact_performance_table(
         merged["Calibration_Slope"] = np.nan
 
     best_row = first_row(merged, "RESTORE")
-    merged["Clinical role"] = merged["Acronym"].map(CLINICAL_ROLE)
+    merged["Clinical role"] = merged["Acronym"].map(CLINICAL_ROLE).fillna(DEFAULT_CLINICAL_ROLE)
     if best_row is None:
         merged["Δ vs RESTORE R²"] = np.nan
         merged["Δ vs RESTORE MAE (m)"] = np.nan
@@ -422,8 +423,9 @@ def build_parsimony_table(
         how="left",
         validate="one_to_one",
     )
-    best_r2 = float(merged.loc[merged["Acronym"].eq("RESTORE"), "Weighted_OOF_R2"].iloc[0])
-    best_mae = float(merged.loc[merged["Acronym"].eq("RESTORE"), "Weighted_OOF_MAE"].iloc[0])
+    restore_row = first_row(merged, "RESTORE")
+    best_r2 = float(restore_row["Weighted_OOF_R2"]) if restore_row is not None else np.nan
+    best_mae = float(restore_row["Weighted_OOF_MAE"]) if restore_row is not None else np.nan
 
     stable = lasso_coefficients[lasso_coefficients["selection_frequency"] >= STABILITY_THRESHOLD].copy()
     rows = []
@@ -433,14 +435,14 @@ def build_parsimony_table(
         unique_count = int((~stable_model["Predictor_Display"].isin(other_predictors)).sum())
         rows.append(
             {
-                "Clinical role": CLINICAL_ROLE[row.Acronym],
+                "Clinical role": CLINICAL_ROLE.get(row.Acronym, DEFAULT_CLINICAL_ROLE),
                 "Acronym": row.Acronym,
                 "Original point-estimate rank": int(row.Overall_Rank),
                 "Input vars": int(row.Input_vars),
                 "Outcome observations": int(row.N_patients),
                 "Observations/variable": f"{float(row.N_patients / row.Input_vars):.1f}",
-                "Δ vs RESTORE R²": f"{float(row.Weighted_OOF_R2 - best_r2):+.4f}",
-                "Δ vs RESTORE MAE (m)": f"{float(row.Weighted_OOF_MAE - best_mae):+.1f}",
+                "Δ vs RESTORE R²": "—" if pd.isna(best_r2) else f"{float(row.Weighted_OOF_R2 - best_r2):+.4f}",
+                "Δ vs RESTORE MAE (m)": "—" if pd.isna(best_mae) else f"{float(row.Weighted_OOF_MAE - best_mae):+.1f}",
                 "Calibration intercept (m)": fmt_or_dash(row.Calibration_Intercept, 1),
                 "Calibration slope": fmt_or_dash(row.Calibration_Slope, 3),
                 "Stable predictors (≥70%)": int(len(stable_model)),
