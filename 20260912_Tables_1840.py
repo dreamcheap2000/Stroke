@@ -160,6 +160,7 @@ def build_compact_performance_table(model_explainers: pd.DataFrame, panel_a: pd.
 
 
 def build_compact_predictor_table(model_explainers: pd.DataFrame, lasso_coefficients: pd.DataFrame) -> pd.DataFrame:
+    ranked_models = model_explainers.sort_values("Overall_Rank").drop_duplicates(subset=["Overall_Rank"])
     stable = lasso_coefficients[lasso_coefficients["selection_frequency"] >= STABILITY_THRESHOLD].copy()
     predictor_summary = (
         stable.groupby("Predictor_Display", as_index=False)
@@ -185,11 +186,11 @@ def build_compact_predictor_table(model_explainers: pd.DataFrame, lasso_coeffici
         + stable["Input_vars"].astype(int).astype(str)
         + ")"
     )
-    stable["Cell"] = stable["bootstrap_coef_mean"].map(lambda value: f"{float(value):+.1f}") + "; " + stable["Selection_Freq_Pct"].astype(str)
+    stable["Cell"] = stable["bootstrap_coef_mean"].map(lambda value: f"{float(value):.1f}") + "; " + stable["Selection_Freq_Pct"].astype(str)
 
     column_order = [
         f"{int(row['Overall_Rank'])}. {row['Acronym']} (n={int(row['Input_vars'])})"
-        for _, row in model_explainers.sort_values("Overall_Rank").iterrows()
+        for _, row in ranked_models.iterrows()
     ]
     compact = (
         stable.pivot_table(index="Predictor_Display", columns="Model_Column", values="Cell", aggfunc="first")
