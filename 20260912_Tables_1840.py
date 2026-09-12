@@ -124,7 +124,7 @@ def build_compact_performance_table(model_explainers: pd.DataFrame, panel_a: pd.
         left_on=["Rank", "Acronym", "Publication name", "Input vars"],
         right_on=["Overall_Rank", "Acronym", "Publication_Name", "Input_vars"],
         how="left",
-        validate="one_to_one",
+        validate="many_to_one",
     )
     compact = merged[
         [
