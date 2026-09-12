@@ -99,12 +99,47 @@ class Tables1840Tests(unittest.TestCase):
         self.assertEqual(result.loc[1, "Calibration intercept (m)"], "—")
         self.assertEqual(result.loc[0, "Calibration slope"], "0.997")
 
+    def test_build_compact_performance_table_handles_missing_restore_reference(self):
+        model_explainers = pd.DataFrame(
+            [
+                {
+                    "Overall_Rank": 4,
+                    "Model_label": "Model 1",
+                    "Acronym": "AIMS",
+                    "Publication_Name": "Model Two",
+                    "Input_vars": 12,
+                    "CV_R2": 0.49001,
+                    "CV_MAE": 95.00,
+                    "Weighted_OOF_R2": 0.50001,
+                    "Weighted_OOF_MAE": 95.00,
+                }
+            ]
+        )
+        panel_a = pd.DataFrame(
+            [
+                {
+                    "Rank": 4,
+                    "Acronym": "AIMS",
+                    "Publication name": "Model Two",
+                    "Input vars": 12,
+                    "Best BalAcc [95% CI]": "75.0% [65.0, 85.0]",
+                    "Worst BalAcc [95% CI]": "73.0% [63.0, 83.0]",
+                }
+            ]
+        )
+
+        result = tables_1840.build_compact_performance_table(model_explainers, panel_a)
+
+        self.assertEqual(result.loc[0, "Δ vs RESTORE R²"], "—")
+        self.assertEqual(result.loc[0, "Δ vs RESTORE MAE (m)"], "—")
+
     def test_build_compact_predictor_table_keeps_shared_predictors_only_and_reorders_models(self):
         model_explainers = pd.DataFrame(
             [
                 {"Overall_Rank": 1, "Acronym": "RESTORE", "Input_vars": 21},
                 {"Overall_Rank": 4, "Acronym": "AIMS", "Input_vars": 12},
                 {"Overall_Rank": 5, "Acronym": "BEDSIDE", "Input_vars": 4},
+                {"Overall_Rank": 6, "Acronym": "ZETA", "Input_vars": 8},
             ]
         )
         lasso_coefficients = pd.DataFrame(
@@ -153,6 +188,17 @@ class Tables1840Tests(unittest.TestCase):
                     "selection_frequency": 0.8,
                     "abs_bootstrap_coef_mean": 5.0,
                 },
+                {
+                    "Overall_Rank": 6,
+                    "Acronym": "ZETA",
+                    "Input_vars": 8,
+                    "Model_label": "Model 99",
+                    "Predictor_Display": "Age",
+                    "bootstrap_coef_mean": -6.0,
+                    "Selection_Freq_Pct": "75%",
+                    "selection_frequency": 0.75,
+                    "abs_bootstrap_coef_mean": 6.0,
+                },
             ]
         )
 
@@ -160,12 +206,13 @@ class Tables1840Tests(unittest.TestCase):
 
         self.assertEqual(
             result.columns.tolist(),
-            ["Predictor", "BEDSIDE (n=4)", "AIMS (n=12)", "RESTORE (n=21)"],
+            ["Predictor", "BEDSIDE (n=4)", "AIMS (n=12)", "RESTORE (n=21)", "ZETA (n=8)"],
         )
         self.assertEqual(result["Predictor"].tolist(), ["Age"])
         self.assertEqual(result.loc[0, "BEDSIDE (n=4)"], "-8.5; 100%")
         self.assertEqual(result.loc[0, "AIMS (n=12)"], "-10.0; 90%")
         self.assertEqual(result.loc[0, "RESTORE (n=21)"], "-32.7; 100%")
+        self.assertEqual(result.loc[0, "ZETA (n=8)"], "-6.0; 75%")
 
 
 if __name__ == "__main__":

@@ -65,6 +65,17 @@ def order_key(acronym: str) -> int:
         return len(PRIMARY_PRESENTATION_ORDER)
 
 
+def sort_by_presentation(df: pd.DataFrame, column: str = "Acronym") -> pd.DataFrame:
+    return df.sort_values([column], key=lambda s: s.map(order_key)).reset_index(drop=True)
+
+
+def first_row(df: pd.DataFrame, acronym: str) -> pd.Series | None:
+    subset = df.loc[df["Acronym"].eq(acronym)]
+    if subset.empty:
+        return None
+    return subset.iloc[0]
+
+
 def set_cell_shading(cell, fill: str) -> None:
     tc_pr = cell._tc.get_or_add_tcPr()
     shd = OxmlElement("w:shd")
@@ -201,11 +212,15 @@ def build_compact_performance_table(
         merged["Calibration_Intercept"] = np.nan
         merged["Calibration_Slope"] = np.nan
 
-    best_row = merged.loc[merged["Acronym"].eq("RESTORE")].iloc[0]
+    best_row = first_row(merged, "RESTORE")
     merged["Clinical role"] = merged["Acronym"].map(CLINICAL_ROLE)
-    merged["Δ vs RESTORE R²"] = merged["Weighted_OOF_R2"] - float(best_row["Weighted_OOF_R2"])
-    merged["Δ vs RESTORE MAE (m)"] = merged["Weighted_OOF_MAE"] - float(best_row["Weighted_OOF_MAE"])
-    merged = merged.sort_values(["Acronym"], key=lambda s: s.map(order_key)).reset_index(drop=True)
+    if best_row is None:
+        merged["Δ vs RESTORE R²"] = np.nan
+        merged["Δ vs RESTORE MAE (m)"] = np.nan
+    else:
+        merged["Δ vs RESTORE R²"] = merged["Weighted_OOF_R2"] - float(best_row["Weighted_OOF_R2"])
+        merged["Δ vs RESTORE MAE (m)"] = merged["Weighted_OOF_MAE"] - float(best_row["Weighted_OOF_MAE"])
+    merged = sort_by_presentation(merged)
 
     compact = merged[
         [
@@ -358,14 +373,15 @@ def compute_continuous_calibration(source, model_explainers: pd.DataFrame) -> tu
             }
         )
 
-    calibration_df = pd.DataFrame(rows).sort_values(["Acronym"], key=lambda s: s.map(order_key)).reset_index(drop=True)
+    calibration_df = sort_by_presentation(pd.DataFrame(rows))
     return calibration_df, decile_data
 
 
 def save_calibration_plot(decile_data: dict[str, pd.DataFrame]) -> None:
     fig, axes = plt.subplots(2, 3, figsize=(14, 8))
     axes_flat = axes.flatten()
-    used_axes = axes_flat[: len(PRIMARY_PRESENTATION_ORDER)]
+    ordered_items = sorted(decile_data.items(), key=lambda item: order_key(item[0]))
+    used_axes = axes_flat[: len(ordered_items)]
 
     all_values = []
     for df in decile_data.values():
@@ -374,8 +390,7 @@ def save_calibration_plot(decile_data: dict[str, pd.DataFrame]) -> None:
     limit = max(all_values) if all_values else 1.0
     limit = max(50.0, float(limit) * 1.05)
 
-    for ax, acronym in zip(used_axes, PRIMARY_PRESENTATION_ORDER):
-        df = decile_data[acronym]
+    for ax, (acronym, df) in zip(used_axes, ordered_items):
         ax.plot([0, limit], [0, limit], linestyle="--", color="gray", linewidth=1)
         ax.plot(df["Predicted"], df["Observed"], marker="o", color="#1F4E78")
         ax.set_title(acronym)
@@ -435,7 +450,7 @@ def build_parsimony_table(
                 "Stable predictors unique to model": unique_count,
             }
         )
-    parsimony_df = pd.DataFrame(rows).sort_values(["Acronym"], key=lambda s: s.map(order_key)).reset_index(drop=True)
+    parsimony_df = sort_by_presentation(pd.DataFrame(rows))
     return parsimony_df
 
 
@@ -573,7 +588,7 @@ def write_supplementary_document(
     )
     add_table(
         doc,
-        panel_a.sort_values(["Acronym"], key=lambda s: s.map(order_key)).reset_index(drop=True),
+        sort_by_presentation(panel_a),
         title="Supplementary Table S2. Full Part 2 IPCW binary classification performance",
         note="Binary performance is preserved exactly, but ordered clinically rather than by point estimate.",
         font_size=7,
@@ -678,11 +693,21 @@ def write_narrative_documents(
     cal_int_max = calibration_df["Calibration_Intercept"].max()
     corr_bbs_gs = float(corr_df.loc[corr_df["Predictor"].eq("BBS1"), "Gait_Speed_1"].iloc[0])
     vif_lookup = dict(zip(vif_df["Predictor"], vif_df["VIF"]))
-    compass_opv = parsimony_df.loc[parsimony_df["Acronym"].eq("COMPASS"), "Observations/variable"].iloc[0]
-    cascade_opv = parsimony_df.loc[parsimony_df["Acronym"].eq("CASCADE"), "Observations/variable"].iloc[0]
-    compass_low_sf = int(parsimony_df.loc[parsimony_df["Acronym"].eq("COMPASS"), "Stable predictors at 70-89%"].iloc[0])
-    cascade_low_sf = int(parsimony_df.loc[parsimony_df["Acronym"].eq("CASCADE"), "Stable predictors at 70-89%"].iloc[0])
-    cascade_unique = int(parsimony_df.loc[parsimony_df["Acronym"].eq("CASCADE"), "Stable predictors unique to model"].iloc[0])
+    complex_rows = parsimony_df.loc[parsimony_df["Clinical role"].eq("Complexity-sensitive comparison")].copy()
+    complexity_sentence = "Complexity-sensitive models were not available in the retained set."
+    if not complex_rows.empty:
+        complex_rows = sort_by_presentation(complex_rows)
+        pieces = []
+        for _, row in complex_rows.iterrows():
+            pieces.append(
+                f"{row['Acronym']} at {row['Observations/variable']} observations per variable with {int(row['Stable predictors at 70-89%'])} stable predictors at 70-89% selection frequency"
+            )
+        unique_max = int(complex_rows["Stable predictors unique to model"].max())
+        complexity_sentence = (
+            "The larger comparison models operated at "
+            + "; ".join(pieces)
+            + f", and up to {unique_max} stable predictors unique to a single complex model, supporting the interpretation that added complexity mainly reflects coefficient instability."
+        )
     mcid_low, mcid_high = MCID_BENCHMARKS_M
 
     methods_doc = Document()
@@ -693,7 +718,7 @@ def write_narrative_documents(
 
     results_doc = Document()
     results_doc.add_paragraph(
-        f"Internal performance differences across retained models were modest enough that the publication-facing comparison now emphasizes clinical parsimony rather than point-estimate rank. BEDSIDE is presented as the primary deployment model and AIMS as the secondary option because, relative to RESTORE, their weighted out-of-fold R² differed by {bedside_row['Δ vs RESTORE R²']} and {aims_row['Δ vs RESTORE R²']}, while weighted out-of-fold MAE increased by only {bedside_row['Δ vs RESTORE MAE (m)']} m and {aims_row['Δ vs RESTORE MAE (m)']} m. Continuous calibration remained reasonably close to ideal across retained models (slopes {cal_slope_min:.3f}-{cal_slope_max:.3f}; intercepts {cal_int_min:.1f}-{cal_int_max:.1f} m), but weighted out-of-fold MAE still ranged from {restore_row['Part 2 weighted OOF MAE (m)']} to {bedside_row['Part 2 weighted OOF MAE (m)']} m, exceeding the {mcid_low:.1f}-{mcid_high:.1f} m 6MWT MCID benchmarks. The larger COMPASS and CASCADE models operated at only {compass_opv} and {cascade_opv} observations per variable, with {compass_low_sf} and {cascade_low_sf} stable predictors appearing at only 70-89% selection frequency and CASCADE contributing {cascade_unique} stable predictors unique to that model, supporting the interpretation that added complexity mainly reflects coefficient instability. Collinearity diagnostics showed a strong physiologic correlation between BBS1 and Gait_Speed_1 (r={corr_bbs_gs:.3f}) but only moderate VIFs (BBS1 {vif_lookup['BBS1']:.2f}, Gait_Speed_1 {vif_lookup['Gait_Speed_1']:.2f}, Age {vif_lookup['Age']:.2f}, FuglUE1 {vif_lookup['FuglUE1']:.2f}). These findings remain based on internal validation only and should be treated as provisional until tested in a distinct external cohort."
+        f"Internal performance differences across retained models were modest enough that the publication-facing comparison now emphasizes clinical parsimony rather than point-estimate rank. BEDSIDE is presented as the primary deployment model and AIMS as the secondary option because, relative to RESTORE, their weighted out-of-fold R² differed by {bedside_row['Δ vs RESTORE R²']} and {aims_row['Δ vs RESTORE R²']}, while weighted out-of-fold MAE increased by only {bedside_row['Δ vs RESTORE MAE (m)']} m and {aims_row['Δ vs RESTORE MAE (m)']} m. Continuous calibration remained reasonably close to ideal across retained models (slopes {cal_slope_min:.3f}-{cal_slope_max:.3f}; intercepts {cal_int_min:.1f}-{cal_int_max:.1f} m), but weighted out-of-fold MAE still ranged from {restore_row['Part 2 weighted OOF MAE (m)']} to {bedside_row['Part 2 weighted OOF MAE (m)']} m, exceeding the {mcid_low:.1f}-{mcid_high:.1f} m 6MWT MCID benchmarks. {complexity_sentence} Collinearity diagnostics showed a strong physiologic correlation between BBS1 and Gait_Speed_1 (r={corr_bbs_gs:.3f}) but only moderate VIFs (BBS1 {vif_lookup['BBS1']:.2f}, Gait_Speed_1 {vif_lookup['Gait_Speed_1']:.2f}, Age {vif_lookup['Age']:.2f}, FuglUE1 {vif_lookup['FuglUE1']:.2f}). These findings remain based on internal validation only and should be treated as provisional until tested in a distinct external cohort."
     )
     results_doc.save(OUTPUT_RESULTS)
 
