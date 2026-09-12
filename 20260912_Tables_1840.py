@@ -400,8 +400,7 @@ def build_parsimony_table(
     lasso_coefficients: pd.DataFrame,
     calibration_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    explainers = model_explainers[["Model_label", "Acronym", "Weighted_OOF_R2", "Weighted_OOF_MAE"]].copy()
-    merged = ranking_df.merge(explainers, on=["Model_label", "Acronym"], how="left", validate="one_to_one")
+    merged = ranking_df.copy()
     merged = merged.merge(
         calibration_df[["Acronym", "Calibration_Slope", "Calibration_Intercept"]],
         on="Acronym",
@@ -475,7 +474,19 @@ def build_mcid_table(model_explainers: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def load_tables() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def reorder_panel_b(panel_b: pd.DataFrame) -> pd.DataFrame:
+    ordered_columns = ["Predictor"]
+    for acronym in PRIMARY_PRESENTATION_ORDER:
+        ordered_columns.extend([c for c in panel_b.columns if c.startswith(f"{acronym} ")])
+    remaining = [c for c in panel_b.columns if c not in ordered_columns]
+    return panel_b[ordered_columns + remaining].copy()
+
+
+def reorder_table2(table2: pd.DataFrame) -> pd.DataFrame:
+    return table2.sort_values(["Acronym", "Predictor"], key=lambda s: s.map(order_key) if s.name == "Acronym" else s).reset_index(drop=True)
+
+
+def load_tables() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     with pd.ExcelFile(SOURCE_XLSX) as workbook:
         model_ranking = workbook.parse("Model_Ranking").sort_values("Overall_Rank")
         model_explainers = workbook.parse("Model_Explainers").sort_values("Overall_Rank")
@@ -635,14 +646,14 @@ def write_supplementary_document(
     )
     add_table(
         doc,
-        panel_b,
+        reorder_panel_b(panel_b),
         title="Supplementary Table S6. Full publication Table 1 Panel B stable coefficient matrix",
         note="Rows are predictors and columns are retained models. Cells are bootstrap mean coefficient (bootstrap SD) [95% CI]; selection frequency.",
         font_size=7,
     )
     add_table(
         doc,
-        table2,
+        reorder_table2(table2),
         title="Supplementary Table S7. Full publication Table 2 detailed stable coefficients",
         note="This table retains the detailed coefficient rows for every stable predictor-model pairing from the original publication export.",
         font_size=7,
