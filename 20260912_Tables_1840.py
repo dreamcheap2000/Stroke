@@ -187,6 +187,7 @@ def build_compact_performance_table(
         explainers[
             [
                 "Overall_Rank",
+                "Model_label",
                 "Acronym",
                 "Publication name",
                 "Input_vars",
@@ -204,8 +205,9 @@ def build_compact_performance_table(
 
     if calibration_df is not None and not calibration_df.empty:
         merged = merged.merge(
-            calibration_df[["Acronym", "Calibration_Intercept", "Calibration_Slope"]],
-            on="Acronym",
+            calibration_df[["Model_label", "Calibration_Intercept", "Calibration_Slope"]],
+            left_on="Model",
+            right_on="Model_label",
             how="left",
             validate="one_to_one",
         )
@@ -346,7 +348,10 @@ def compute_continuous_calibration(source, model_explainers: pd.DataFrame) -> tu
             model.fit(X_tr, y[tr], sample_weight=weights[tr])
             oof[te] = np.maximum(0, model.predict(X_te))
 
-        wls = sm.WLS(y, sm.add_constant(oof), weights=weights).fit()
+        predicted_mean = weighted_mean(oof, weights)
+        observed_mean = weighted_mean(y, weights)
+        centered_pred = oof - predicted_mean
+        slope_model = sm.WLS(y - observed_mean, centered_pred, weights=weights).fit()
         order = np.argsort(oof)
         bins = np.array_split(order, 10)
         decile_rows = []
@@ -365,10 +370,10 @@ def compute_continuous_calibration(source, model_explainers: pd.DataFrame) -> tu
             {
                 "Model_label": model_label,
                 "Acronym": str(explainer["Acronym"]),
-                "Calibration_Intercept": float(wls.params[0]),
-                "Calibration_Slope": float(wls.params[1]),
-                "Observed_mean_6MWT4": weighted_mean(y, weights),
-                "Predicted_mean_6MWT4": weighted_mean(oof, weights),
+                "Calibration_Intercept": float(observed_mean - predicted_mean),
+                "Calibration_Slope": float(slope_model.params[0]),
+                "Observed_mean_6MWT4": observed_mean,
+                "Predicted_mean_6MWT4": predicted_mean,
                 "Weighted_OOF_R2": float(explainer["Weighted_OOF_R2"]),
                 "Weighted_OOF_MAE": float(explainer["Weighted_OOF_MAE"]),
             }
@@ -401,7 +406,7 @@ def save_calibration_plot(decile_data: dict[str, pd.DataFrame]) -> None:
         ax.set_ylim(0, limit)
         ax.grid(alpha=0.25)
 
-    for ax in axes_flat[len(PRIMARY_PRESENTATION_ORDER):]:
+    for ax in axes_flat[len(ordered_items):]:
         ax.axis("off")
 
     fig.suptitle("Internal weighted OOF calibration by clinically ordered retained model", fontsize=12)
@@ -627,7 +632,7 @@ def write_supplementary_document(
             }
         ),
         title="Supplementary Table S3. Internal weighted OOF calibration summary",
-        note="Calibration was estimated by weighted linear recalibration of observed 6MWT4 on weighted OOF predictions among completers.",
+        note="Calibration intercept is the weighted mean observed-minus-predicted difference (ideal 0 m), and calibration slope is the centered weighted recalibration slope (ideal 1.0) among completers.",
         font_size=7,
     )
 
@@ -680,15 +685,15 @@ def write_supplementary_document(
 
 
 def write_narrative_documents(
-    compact_performance: pd.DataFrame,
+    model_explainers: pd.DataFrame,
     calibration_df: pd.DataFrame,
     parsimony_df: pd.DataFrame,
     corr_df: pd.DataFrame,
     vif_df: pd.DataFrame,
 ) -> None:
-    restore_row = compact_performance.loc[compact_performance["Acronym"].eq("RESTORE")].iloc[0]
-    bedside_row = compact_performance.loc[compact_performance["Acronym"].eq("BEDSIDE")].iloc[0]
-    aims_row = compact_performance.loc[compact_performance["Acronym"].eq("AIMS")].iloc[0]
+    restore_metrics = first_row(model_explainers, "RESTORE")
+    bedside_metrics = first_row(model_explainers, "BEDSIDE")
+    aims_metrics = first_row(model_explainers, "AIMS")
     cal_slope_min = calibration_df["Calibration_Slope"].min()
     cal_slope_max = calibration_df["Calibration_Slope"].max()
     cal_int_min = calibration_df["Calibration_Intercept"].min()
@@ -702,15 +707,18 @@ def write_narrative_documents(
         pieces = []
         for _, row in complex_rows.iterrows():
             pieces.append(
-                f"{row['Acronym']} at {row['Observations/variable']} observations per variable with {int(row['Stable predictors at 70-89%'])} stable predictors at 70-89% selection frequency"
+                f"{row['Acronym']} ({row['Observations/variable']} observations per variable; {int(row['Stable predictors at 70-89%'])} stable predictors at 70-89% selection frequency)"
             )
         unique_max = int(complex_rows["Stable predictors unique to model"].max())
         complexity_sentence = (
-            "The larger comparison models operated at "
+            "The larger comparison models were "
             + "; ".join(pieces)
             + f", and up to {unique_max} stable predictors unique to a single complex model, supporting the interpretation that added complexity mainly reflects coefficient instability."
         )
     mcid_low, mcid_high = MCID_BENCHMARKS_M
+
+    if any(item is None for item in [restore_metrics, bedside_metrics, aims_metrics]):
+        raise ValueError("RESTORE, BEDSIDE, and AIMS must be present to write the publication narrative outputs.")
 
     methods_doc = Document()
     methods_doc.add_paragraph(
@@ -720,7 +728,7 @@ def write_narrative_documents(
 
     results_doc = Document()
     results_doc.add_paragraph(
-        f"Internal performance differences across retained models were modest enough that the publication-facing comparison now emphasizes clinical parsimony rather than point-estimate rank. BEDSIDE is presented as the primary deployment model and AIMS as the secondary option because, relative to RESTORE, their weighted out-of-fold R² differed by {bedside_row['Δ vs RESTORE R²']} and {aims_row['Δ vs RESTORE R²']}, while weighted out-of-fold MAE increased by only {bedside_row['Δ vs RESTORE MAE (m)']} m and {aims_row['Δ vs RESTORE MAE (m)']} m. Continuous calibration remained reasonably close to ideal across retained models (slopes {cal_slope_min:.3f}-{cal_slope_max:.3f}; intercepts {cal_int_min:.1f}-{cal_int_max:.1f} m), but weighted out-of-fold MAE still ranged from {restore_row['Part 2 weighted OOF MAE (m)']} to {bedside_row['Part 2 weighted OOF MAE (m)']} m, exceeding the {mcid_low:.1f}-{mcid_high:.1f} m 6MWT MCID benchmarks. {complexity_sentence} Collinearity diagnostics showed a strong physiologic correlation between BBS1 and Gait_Speed_1 (r={corr_bbs_gs:.3f}) but only moderate VIFs (BBS1 {vif_lookup['BBS1']:.2f}, Gait_Speed_1 {vif_lookup['Gait_Speed_1']:.2f}, Age {vif_lookup['Age']:.2f}, FuglUE1 {vif_lookup['FuglUE1']:.2f}). These findings remain based on internal validation only and should be treated as provisional until tested in a distinct external cohort."
+        f"Internal performance differences across retained models were modest enough that the publication-facing comparison now emphasizes clinical parsimony rather than point-estimate rank. BEDSIDE is presented as the primary deployment model and AIMS as the secondary option because, relative to RESTORE, their weighted out-of-fold R² differed by {float(bedside_metrics['Weighted_OOF_R2'] - restore_metrics['Weighted_OOF_R2']):+.4f} and {float(aims_metrics['Weighted_OOF_R2'] - restore_metrics['Weighted_OOF_R2']):+.4f}, while weighted out-of-fold MAE increased by only {float(bedside_metrics['Weighted_OOF_MAE'] - restore_metrics['Weighted_OOF_MAE']):+.1f} m and {float(aims_metrics['Weighted_OOF_MAE'] - restore_metrics['Weighted_OOF_MAE']):+.1f} m. Continuous calibration remained reasonably close to ideal across retained models (slopes {cal_slope_min:.3f}-{cal_slope_max:.3f}; intercepts {cal_int_min:.1f}-{cal_int_max:.1f} m), but weighted out-of-fold MAE still ranged from {float(restore_metrics['Weighted_OOF_MAE']):.1f} to {float(bedside_metrics['Weighted_OOF_MAE']):.1f} m, exceeding the {mcid_low:.1f}-{mcid_high:.1f} m 6MWT MCID benchmarks. {complexity_sentence} Collinearity diagnostics showed a strong physiologic correlation between BBS1 and Gait_Speed_1 (r={corr_bbs_gs:.3f}) but only moderate VIFs (BBS1 {vif_lookup['BBS1']:.2f}, Gait_Speed_1 {vif_lookup['Gait_Speed_1']:.2f}, Age {vif_lookup['Age']:.2f}, FuglUE1 {vif_lookup['FuglUE1']:.2f}). These findings remain based on internal validation only and should be treated as provisional until tested in a distinct external cohort."
     )
     results_doc.save(OUTPUT_RESULTS)
 
@@ -746,7 +754,7 @@ def main() -> None:
         panel_b,
         table2,
     )
-    write_narrative_documents(compact_performance, calibration_df, parsimony_df, corr_df, vif_df)
+    write_narrative_documents(model_explainers, calibration_df, parsimony_df, corr_df, vif_df)
     print(f"Wrote {OUTPUT_DOCX.name}")
     print(f"Wrote {OUTPUT_SUPPLEMENTARY.name}")
     print(f"Wrote {OUTPUT_METHODS.name}")

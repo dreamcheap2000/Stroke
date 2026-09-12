@@ -56,6 +56,7 @@ class Tables1840Tests(unittest.TestCase):
                 {
                     "Rank": 1,
                     "Acronym": "RESTORE",
+                    "Model": "Model 5",
                     "Publication name": "Model One",
                     "Input vars": 21,
                     "Best BalAcc [95% CI]": "80.0% [70.0, 90.0]",
@@ -64,6 +65,7 @@ class Tables1840Tests(unittest.TestCase):
                 {
                     "Rank": 4,
                     "Acronym": "AIMS",
+                    "Model": "Model 1",
                     "Publication name": "Model Two",
                     "Input vars": 12,
                     "Best BalAcc [95% CI]": "75.0% [65.0, 85.0]",
@@ -72,6 +74,7 @@ class Tables1840Tests(unittest.TestCase):
                 {
                     "Rank": 5,
                     "Acronym": "BEDSIDE",
+                    "Model": "Model 4",
                     "Publication name": "Model Three",
                     "Input vars": 4,
                     "Best BalAcc [95% CI]": "74.0% [64.0, 84.0]",
@@ -81,9 +84,9 @@ class Tables1840Tests(unittest.TestCase):
         )
         calibration = pd.DataFrame(
             [
-                {"Acronym": "RESTORE", "Calibration_Intercept": 10.2, "Calibration_Slope": 0.9653},
-                {"Acronym": "AIMS", "Calibration_Intercept": None, "Calibration_Slope": 0.9724},
-                {"Acronym": "BEDSIDE", "Calibration_Intercept": 1.2, "Calibration_Slope": 0.9969},
+                {"Model_label": "Model 5", "Acronym": "RESTORE", "Calibration_Intercept": 10.2, "Calibration_Slope": 0.9653},
+                {"Model_label": "Model 1", "Acronym": "AIMS", "Calibration_Intercept": None, "Calibration_Slope": 0.9724},
+                {"Model_label": "Model 4", "Acronym": "BEDSIDE", "Calibration_Intercept": 1.2, "Calibration_Slope": 0.9969},
             ]
         )
 
@@ -120,6 +123,7 @@ class Tables1840Tests(unittest.TestCase):
                 {
                     "Rank": 6,
                     "Acronym": "ZETA",
+                    "Model": "Model 99",
                     "Publication name": "Model Two",
                     "Input vars": 12,
                     "Best BalAcc [95% CI]": "75.0% [65.0, 85.0]",
@@ -127,10 +131,16 @@ class Tables1840Tests(unittest.TestCase):
                 }
             ]
         )
+        calibration = pd.DataFrame(
+            [
+                {"Model_label": "Model 99", "Calibration_Intercept": 0.5, "Calibration_Slope": 0.99},
+            ]
+        )
 
-        result = tables_1840.build_compact_performance_table(model_explainers, panel_a)
+        result = tables_1840.build_compact_performance_table(model_explainers, panel_a, calibration)
 
         self.assertEqual(result.loc[0, "Clinical role"], "Additional comparison")
+        self.assertEqual(result.loc[0, "Calibration intercept (m)"], "0.5")
         self.assertEqual(result.loc[0, "Δ vs RESTORE R²"], "—")
         self.assertEqual(result.loc[0, "Δ vs RESTORE MAE (m)"], "—")
 
