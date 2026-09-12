@@ -268,15 +268,15 @@ def write_supplementary_document(panel_a: pd.DataFrame, panel_b: pd.DataFrame, t
     add_table(
         doc,
         panel_b,
-        title="Supplementary Table S2. Full predictor-by-model stable coefficient matrix",
-        note="Cells are bootstrap mean coefficient (bootstrap SD) [95% CI]; selection frequency.",
+        title="Supplementary Table S2. Full publication Table 1 Panel B stable coefficient matrix",
+        note="Rows are predictors and columns are retained models. Cells are bootstrap mean coefficient (bootstrap SD) [95% CI]; selection frequency.",
         font_size=7,
     )
     add_table(
         doc,
         table2,
-        title="Supplementary Table S3. Full stable coefficient details by predictor-model pairing",
-        note="This table retains the detailed coefficient rows for every stable predictor-model pairing.",
+        title="Supplementary Table S3. Full publication Table 2 detailed stable coefficients",
+        note="This table retains the detailed coefficient rows for every stable predictor-model pairing from the original publication Table 2 export.",
         font_size=7,
     )
 
