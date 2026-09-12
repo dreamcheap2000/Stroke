@@ -112,19 +112,16 @@ def build_compact_performance_table(model_explainers: pd.DataFrame, panel_a: pd.
         model_explainers[
             [
                 "Overall_Rank",
-                "Acronym",
-                "Publication_Name",
-                "Input_vars",
                 "CV_R2",
                 "CV_MAE",
                 "Weighted_OOF_R2",
                 "Weighted_OOF_MAE",
             ]
         ],
-        left_on=["Rank", "Acronym", "Publication name", "Input vars"],
-        right_on=["Overall_Rank", "Acronym", "Publication_Name", "Input_vars"],
+        left_on="Rank",
+        right_on="Overall_Rank",
         how="left",
-        validate="many_to_one",
+        validate="one_to_one",
     )
     compact = merged[
         [
@@ -175,7 +172,7 @@ def build_compact_predictor_table(model_explainers: pd.DataFrame, lasso_coeffici
 
     stable = stable[stable["Predictor_Display"].isin(keep_predictors["Predictor_Display"])].copy()
     stable["Model_Column"] = stable.apply(
-        lambda row: f"{row['Acronym']} (n={int(row['Input_vars'])})",
+        lambda row: f"{int(row['Overall_Rank'])}. {row['Acronym']} (n={int(row['Input_vars'])})",
         axis=1,
     )
     stable["Cell"] = stable.apply(
@@ -184,7 +181,7 @@ def build_compact_predictor_table(model_explainers: pd.DataFrame, lasso_coeffici
     )
 
     column_order = [
-        f"{row['Acronym']} (n={int(row['Input_vars'])})"
+        f"{int(row['Overall_Rank'])}. {row['Acronym']} (n={int(row['Input_vars'])})"
         for _, row in model_explainers.sort_values("Overall_Rank").iterrows()
     ]
     compact = (
