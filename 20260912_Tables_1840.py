@@ -407,7 +407,7 @@ def save_calibration_plot(decile_data: dict[str, pd.DataFrame]) -> None:
         ax.axis("off")
 
     fig.suptitle("Internal OOF calibration by clinically ordered retained model", fontsize=12)
-    fig.tight_layout()
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(OUTPUT_CALIBRATION_PNG, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
@@ -432,8 +432,8 @@ def build_parsimony_table(
     stable = lasso_coefficients[lasso_coefficients["selection_frequency"] >= STABILITY_THRESHOLD].copy()
     rows = []
     for row in merged.itertuples(index=False):
-        stable_model = stable[stable["Acronym"] == row.Acronym].copy()
-        other_predictors = stable.loc[stable["Acronym"] != row.Acronym, "Predictor_Display"]
+        stable_model = stable[stable["Model_label"] == row.Model_label].copy()
+        other_predictors = stable.loc[stable["Model_label"] != row.Model_label, "Predictor_Display"]
         unique_count = int((~stable_model["Predictor_Display"].isin(other_predictors)).sum())
         rows.append(
             {
@@ -502,7 +502,9 @@ def reorder_panel_b(panel_b: pd.DataFrame) -> pd.DataFrame:
 
 
 def reorder_table2(table2: pd.DataFrame) -> pd.DataFrame:
-    return table2.sort_values(["Acronym", "Predictor"], key=lambda s: s.map(order_key) if s.name == "Acronym" else s).reset_index(drop=True)
+    ordered = table2.copy()
+    ordered["_order"] = ordered["Acronym"].map(order_key)
+    return ordered.sort_values(["_order", "Acronym", "Predictor"]).drop(columns="_order").reset_index(drop=True)
 
 
 def load_tables() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
