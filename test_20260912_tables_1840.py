@@ -144,7 +144,7 @@ class Tables1840Tests(unittest.TestCase):
         self.assertEqual(result.loc[0, "Δ vs RESTORE R²"], "—")
         self.assertEqual(result.loc[0, "Δ vs RESTORE MAE (m)"], "—")
 
-    def test_build_compact_performance_table_leaves_unmatched_metadata_blank(self):
+    def test_build_compact_performance_table_uses_model_identifier_for_merge(self):
         model_explainers = pd.DataFrame(
             [
                 {
@@ -181,8 +181,8 @@ class Tables1840Tests(unittest.TestCase):
 
         result = tables_1840.build_compact_performance_table(model_explainers, panel_a, calibration)
 
-        self.assertEqual(result.loc[0, "Part 1 CV R²"], "—")
-        self.assertEqual(result.loc[0, "Part 2 weighted OOF MAE (m)"], "—")
+        self.assertEqual(result.loc[0, "Part 1 CV R²"], "0.5432")
+        self.assertEqual(result.loc[0, "Part 2 weighted OOF MAE (m)"], "90.4")
         self.assertEqual(result.loc[0, "Calibration intercept (m)"], "1.0")
         self.assertEqual(result.loc[0, "Best BalAcc [95% CI]"], "80.0% [70.0, 90.0]")
 

@@ -189,19 +189,23 @@ def build_compact_performance_table(
                 "Overall_Rank",
                 "Model_label",
                 "Acronym",
-                "Publication name",
                 "Input_vars",
+                "Publication name",
                 "CV_R2",
                 "CV_MAE",
                 "Weighted_OOF_R2",
                 "Weighted_OOF_MAE",
             ]
         ],
-        left_on=["Acronym", "Publication name", "Input vars"],
-        right_on=["Acronym", "Publication name", "Input_vars"],
+        left_on=["Acronym", "Model", "Input vars"],
+        right_on=["Acronym", "Model_label", "Input_vars"],
         how="left",
         validate="one_to_one",
     )
+    if "Publication name_x" in merged.columns:
+        merged["Publication name"] = merged["Publication name_x"]
+    elif "Publication name_y" in merged.columns:
+        merged["Publication name"] = merged["Publication name_y"]
 
     if calibration_df is not None and not calibration_df.empty:
         merged = merged.merge(
@@ -374,9 +378,12 @@ def compute_continuous_calibration(source, model_explainers: pd.DataFrame) -> tu
 
 
 def save_calibration_plot(decile_data: dict[str, pd.DataFrame]) -> None:
-    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
-    axes_flat = axes.flatten()
     ordered_items = sorted(decile_data.items(), key=lambda item: order_key(item[0]))
+    n_models = max(1, len(ordered_items))
+    ncols = min(3, n_models)
+    nrows = int(np.ceil(n_models / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.5 * ncols + 0.5, 3.8 * nrows + 0.4))
+    axes_flat = np.atleast_1d(axes).flatten()
     used_axes = axes_flat[: len(ordered_items)]
 
     all_values = []
@@ -453,9 +460,8 @@ def build_parsimony_table(
 
 def build_collinearity_outputs() -> tuple[pd.DataFrame, pd.DataFrame]:
     data = pd.read_excel(SOURCE_DATA_XLSX)[COLLINEARITY_VARIABLES].apply(pd.to_numeric, errors="coerce")
-    corr = data.corr().round(3).reset_index().rename(columns={"index": "Predictor"})
-
     complete = data.dropna().reset_index(drop=True)
+    corr = complete.corr().round(3).reset_index().rename(columns={"index": "Predictor"})
     X = sm.add_constant(complete)
     vif_rows = []
     for idx, column in enumerate(complete.columns, start=1):
