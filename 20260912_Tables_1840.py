@@ -103,6 +103,11 @@ def add_table(doc: Document, df: pd.DataFrame, *, title: str, note: str | None =
 
 
 def build_compact_performance_table(model_explainers: pd.DataFrame, panel_a: pd.DataFrame) -> pd.DataFrame:
+    def fmt_or_dash(value, digits: int) -> str:
+        if pd.isna(value):
+            return "—"
+        return f"{float(value):.{digits}f}"
+
     merged = panel_a.merge(
         model_explainers[
             [
@@ -144,10 +149,10 @@ def build_compact_performance_table(model_explainers: pd.DataFrame, panel_a: pd.
         },
         inplace=True,
     )
-    compact["Part 1 CV R²"] = compact["Part 1 CV R²"].map(lambda x: f"{float(x):.4f}")
-    compact["Part 1 MAE (m)"] = compact["Part 1 MAE (m)"].map(lambda x: f"{float(x):.2f}")
-    compact["Part 2 weighted OOF R²"] = compact["Part 2 weighted OOF R²"].map(lambda x: f"{float(x):.4f}")
-    compact["Part 2 weighted OOF MAE (m)"] = compact["Part 2 weighted OOF MAE (m)"].map(lambda x: f"{float(x):.1f}")
+    compact["Part 1 CV R²"] = compact["Part 1 CV R²"].map(lambda x: fmt_or_dash(x, 4))
+    compact["Part 1 MAE (m)"] = compact["Part 1 MAE (m)"].map(lambda x: fmt_or_dash(x, 2))
+    compact["Part 2 weighted OOF R²"] = compact["Part 2 weighted OOF R²"].map(lambda x: fmt_or_dash(x, 4))
+    compact["Part 2 weighted OOF MAE (m)"] = compact["Part 2 weighted OOF MAE (m)"].map(lambda x: fmt_or_dash(x, 1))
     return compact
 
 
