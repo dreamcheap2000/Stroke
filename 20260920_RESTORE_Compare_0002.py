@@ -105,7 +105,11 @@ def _build_id_grouped_splits(
         raise ValueError(f"Column '{id_col}' contains missing values; cannot build ID-grouped CV folds.")
 
     unique_ids = np.sort(ids.unique())
-    id_cv = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    n_unique = int(unique_ids.shape[0])
+    if n_unique < 2:
+        raise ValueError(f"Need at least 2 unique IDs for CV; found {n_unique}.")
+    effective_splits = min(n_splits, n_unique)
+    id_cv = KFold(n_splits=effective_splits, shuffle=True, random_state=random_state)
     splits = []
     for train_uid_idx, test_uid_idx in id_cv.split(unique_ids):
         train_ids = set(unique_ids[train_uid_idx])
@@ -248,7 +252,7 @@ def main() -> None:
     bedside_original_df = df.loc[df["6MWT4"].notna()].copy()
     week3_eligible_mask = df["6MWT4"].notna() & df["Rehab_LOS_Category"].isin(module.QUALIFYING_REHAB_LOS)
     restore_original_df = df.loc[week3_eligible_mask].copy()
-    pair_df = restore_original_df.copy().sort_values(["ID"]).reset_index(drop=True)
+    pair_df = restore_original_df.copy()
     cv_splits = _build_id_grouped_splits(
         pair_df,
         id_col="ID",
