@@ -91,6 +91,31 @@ def _fit_oof(
     )
 
 
+def _build_id_grouped_splits(
+    df: pd.DataFrame,
+    *,
+    id_col: str,
+    n_splits: int,
+    random_state: int,
+):
+    if id_col not in df.columns:
+        raise ValueError(f"Required column '{id_col}' is missing; cannot build ID-grouped CV folds.")
+    ids = df[id_col]
+    if ids.isna().any():
+        raise ValueError(f"Column '{id_col}' contains missing values; cannot build ID-grouped CV folds.")
+
+    unique_ids = np.sort(ids.unique())
+    id_cv = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    splits = []
+    for train_uid_idx, test_uid_idx in id_cv.split(unique_ids):
+        train_ids = set(unique_ids[train_uid_idx])
+        test_ids = set(unique_ids[test_uid_idx])
+        train_rows = np.where(ids.isin(train_ids).to_numpy())[0]
+        test_rows = np.where(ids.isin(test_ids).to_numpy())[0]
+        splits.append((train_rows, test_rows))
+    return splits
+
+
 def _write_main_docx(results: dict[str, float], output_path: Path) -> None:
     doc = Document()
     title = doc.add_paragraph()
@@ -223,12 +248,13 @@ def main() -> None:
     bedside_original_df = df.loc[df["6MWT4"].notna()].copy()
     week3_eligible_mask = df["6MWT4"].notna() & df["Rehab_LOS_Category"].isin(module.QUALIFYING_REHAB_LOS)
     restore_original_df = df.loc[week3_eligible_mask].copy()
-    pair_df = restore_original_df.copy()
-    if "ID" in pair_df.columns:
-        pair_df = pair_df.sort_values(["ID"]).reset_index(drop=True)
-    else:
-        pair_df = pair_df.sort_index().reset_index(drop=True)
-    cv_splits = list(KFold(n_splits=module.CV_FOLDS, shuffle=True, random_state=module.RANDOM_STATE).split(pair_df))
+    pair_df = restore_original_df.copy().sort_values(["ID"]).reset_index(drop=True)
+    cv_splits = _build_id_grouped_splits(
+        pair_df,
+        id_col="ID",
+        n_splits=module.CV_FOLDS,
+        random_state=module.RANDOM_STATE,
+    )
 
     y_pair = pair_df["6MWT4"].to_numpy(dtype=float)
     pred_bedside_pair = _fit_oof(module, pair_df, bedside_features, cv_splits)
