@@ -233,7 +233,14 @@ def main() -> None:
         bedside_features,
         KFold(n_splits=module.CV_FOLDS, shuffle=True, random_state=module.RANDOM_STATE),
     )
+    pred_restore_original = _fit_oof(
+        module,
+        restore_original_df,
+        restore_features,
+        KFold(n_splits=module.CV_FOLDS, shuffle=True, random_state=module.RANDOM_STATE),
+    )
     y_bedside_original = bedside_original_df["6MWT4"].to_numpy(dtype=float)
+    y_restore_original = restore_original_df["6MWT4"].to_numpy(dtype=float)
 
     ci = _paired_bootstrap_ci(y_pair, pred_bedside_pair, pred_restore_pair)
     results = {
@@ -242,8 +249,8 @@ def main() -> None:
         "n_paired": int(len(pair_df)),
         "bedside_original_mae": float(mean_absolute_error(y_bedside_original, pred_bedside_original)),
         "bedside_original_r2": float(r2_score(y_bedside_original, pred_bedside_original)),
-        "restore_original_mae": float(mean_absolute_error(y_pair, pred_restore_pair)),
-        "restore_original_r2": float(r2_score(y_pair, pred_restore_pair)),
+        "restore_original_mae": float(mean_absolute_error(y_restore_original, pred_restore_original)),
+        "restore_original_r2": float(r2_score(y_restore_original, pred_restore_original)),
         "bedside_paired_mae": float(mean_absolute_error(y_pair, pred_bedside_pair)),
         "bedside_paired_r2": float(r2_score(y_pair, pred_bedside_pair)),
         "restore_paired_mae": float(mean_absolute_error(y_pair, pred_restore_pair)),
