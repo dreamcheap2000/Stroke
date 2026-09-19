@@ -111,3 +111,25 @@ python IPCW_Out_20260919.py 20260826_DeID.xlsx
   - `20260919_Comprehensive_1327.docx`
   - `20260919_Comprehensive_1018.xlsx`
   - `20260919_Comprehensive_1018.docx`
+
+### H) 20260919 Supplementary Table 1 cohort reconciliation (511 vs 517)
+- Script: `20260919_Supplementary_Table1.py`
+- Input dataset: `20260826_DeID.xlsx`
+- Cohort definitions used by this script:
+  - **Eligible ambulatory cohort (n=517)**: `PAC_Program_Completion == "Completed PAC program"` and `6MWT_Best_Scenario == 1` (cross-checked against non-missing `Initial_6MWT_Distance`).
+  - **Continuous-model analytic cohort (n=511)**: eligible ambulatory cohort with non-missing `6MWT4`.
+  - **Excluded from model (n=6)**: eligible ambulatory completers with missing `6MWT4` (IDs: `107,112,208,257,458,550`).
+- Produces:
+  - `20260919_Supplementary_Table1.docx`
+  - `20260919_Supplementary_Table1_Cohort_Metadata.csv`
+  - `20260919_Supplementary_Table1_Cohort_Reconciliation.csv`
+
+Run:
+```bash
+python 20260919_Supplementary_Table1.py
+```
+
+Validation:
+```bash
+python -m unittest test_20260919_supplementary_table1.py
+```

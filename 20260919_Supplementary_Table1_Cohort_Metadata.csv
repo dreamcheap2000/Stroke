@@ -1,0 +1,2 @@
+Source workbook,Eligible ambulatory definition,Model-analytic definition,N eligible ambulatory,N model-analytic (observed 6MWT4),N excluded from model,Excluded reason,Excluded IDs (de-identified)
+20260826_DeID.xlsx,Completed PAC program AND 6MWT_Best_Scenario == 1,Eligible ambulatory AND non-missing 6MWT4,517,511,6,Missing 6MWT4,"107,112,208,257,458,550"
