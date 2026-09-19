@@ -163,6 +163,11 @@ def _write_main_docx(results: dict[str, float], output_path: Path) -> None:
         f"({results['n_valid_bootstrap']} valid resamples)."
     )
     _small(bootstrap_note)
+    if results["n_nonfinite_excluded"] > 0:
+        exclusion_note = doc.add_paragraph(
+            f"Rows excluded after OOF prediction due to non-finite values: {results['n_nonfinite_excluded']}."
+        )
+        _small(exclusion_note)
 
     doc.save(output_path)
 
@@ -216,16 +221,23 @@ def main() -> None:
     restore_features = module._filter_existing(restore_features, df)
 
     bedside_original_df = df.loc[df["6MWT4"].notna()].copy()
+    week3_eligible_mask = df["6MWT4"].notna() & df["Rehab_LOS_Category"].isin(module.QUALIFYING_REHAB_LOS)
     restore_original_df = df.loc[
         df["6MWT4"].notna() & df["Rehab_LOS_Category"].isin(module.QUALIFYING_REHAB_LOS)
     ].copy()
 
-    pair_df = restore_original_df.copy()
+    pair_df = df.loc[week3_eligible_mask].copy()
     cv_splits = list(KFold(n_splits=module.CV_FOLDS, shuffle=True, random_state=module.RANDOM_STATE).split(pair_df))
 
     y_pair = pair_df["6MWT4"].to_numpy(dtype=float)
     pred_bedside_pair = _fit_oof(module, pair_df, bedside_features, cv_splits)
     pred_restore_pair = _fit_oof(module, pair_df, restore_features, cv_splits)
+    evaluable_mask = np.isfinite(y_pair) & np.isfinite(pred_bedside_pair) & np.isfinite(pred_restore_pair)
+    n_nonfinite_excluded = int((~evaluable_mask).sum())
+    if n_nonfinite_excluded:
+        y_pair = y_pair[evaluable_mask]
+        pred_bedside_pair = pred_bedside_pair[evaluable_mask]
+        pred_restore_pair = pred_restore_pair[evaluable_mask]
 
     pred_bedside_original = _fit_oof(
         module,
@@ -246,7 +258,8 @@ def main() -> None:
     results = {
         "n_bedside_original": int(len(bedside_original_df)),
         "n_restore_original": int(len(restore_original_df)),
-        "n_paired": int(len(pair_df)),
+        "n_paired": int(y_pair.shape[0]),
+        "n_nonfinite_excluded": int(n_nonfinite_excluded),
         "bedside_original_mae": float(mean_absolute_error(y_bedside_original, pred_bedside_original)),
         "bedside_original_r2": float(r2_score(y_bedside_original, pred_bedside_original)),
         "restore_original_mae": float(mean_absolute_error(y_restore_original, pred_restore_original)),
