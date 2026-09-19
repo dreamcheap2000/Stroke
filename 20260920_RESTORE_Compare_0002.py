@@ -222,11 +222,12 @@ def main() -> None:
 
     bedside_original_df = df.loc[df["6MWT4"].notna()].copy()
     week3_eligible_mask = df["6MWT4"].notna() & df["Rehab_LOS_Category"].isin(module.QUALIFYING_REHAB_LOS)
-    restore_original_df = df.loc[
-        df["6MWT4"].notna() & df["Rehab_LOS_Category"].isin(module.QUALIFYING_REHAB_LOS)
-    ].copy()
-
-    pair_df = df.loc[week3_eligible_mask].copy()
+    restore_original_df = df.loc[week3_eligible_mask].copy()
+    pair_df = restore_original_df.copy()
+    if "ID" in pair_df.columns:
+        pair_df = pair_df.sort_values(["ID"]).reset_index(drop=True)
+    else:
+        pair_df = pair_df.sort_index().reset_index(drop=True)
     cv_splits = list(KFold(n_splits=module.CV_FOLDS, shuffle=True, random_state=module.RANDOM_STATE).split(pair_df))
 
     y_pair = pair_df["6MWT4"].to_numpy(dtype=float)
