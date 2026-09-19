@@ -86,3 +86,28 @@ Run:
 ```bash
 python 20260828_5_Tiers_1201.py
 ```
+
+### G) 20260919 IPCW/SMD refresh and downstream synchronized outputs
+- Newest patient-level input used for refresh: `20260826_DeID.xlsx`
+  - Chosen because it is the latest DeID patient-level cohort file used by active IPCW/comprehensive modeling scripts.
+  - Newer workbooks (e.g., `20260903_*`, `20260904_*`, `20260909_*`) are model-output workbooks with derived prediction/summary sheets, not raw patient-level source inputs.
+- IPCW rerun script: `IPCW_Out_20260919.py`
+- Input dataset: `20260826_DeID.xlsx`
+- Produces:
+  - `IPCW_summary_out_20260919.csv`
+  - `IPCW_smd_out_20260919.csv`
+
+Run:
+```bash
+python IPCW_Out_20260919.py 20260826_DeID.xlsx
+```
+
+- Downstream synchronized outputs regenerated from the same input chain and saved with `20260919` naming:
+  - `20260919_DeID_IPCW_Predicted_6MWT.xlsx`
+  - `20260919_5_Tiers_1201.docx`
+  - `20260919_LASSO_1153.xlsx`
+  - `20260919_LASSO_1153.docx`
+  - `20260919_Comprehensive_1327.xlsx`
+  - `20260919_Comprehensive_1327.docx`
+  - `20260919_Comprehensive_1018.xlsx`
+  - `20260919_Comprehensive_1018.docx`
