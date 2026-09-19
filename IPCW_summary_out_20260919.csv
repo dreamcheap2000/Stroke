@@ -11,13 +11,13 @@ Effective sample size (ESS),567.1
 N covariates SMD>0.1 pre-IPCW,40.0
 N covariates SMD>0.1 post-IPCW,0.0
 Max SMD post-IPCW,0.0418
-6MWT4 model: IPCW WLS CV-R²,0.4679
+6MWT4 model: IPCW WLS CV-R² (unweighted folds),0.4679
 6MWT4 model: IPCW WLS RMSE,104.4
 6MWT4 model: IPCW WLS MAE,79.8
 6MWT4 model: Unweighted CV-R²,0.4679
 6MWT4 model: Unweighted RMSE,104.3
 6MWT4 model: Unweighted MAE,79.6
-Sens-1 Unstabilized IPCW CV-R²,0.4679
+Sens-1 Unstabilized IPCW CV-R² (unweighted folds),0.4679
 Sens-1 Unstabilized IPCW RMSE,104.3
 Sens-1 Unstabilized IPCW MAE,79.7
 Sens-2 Multiple Imputation CV-R²,0.5364
