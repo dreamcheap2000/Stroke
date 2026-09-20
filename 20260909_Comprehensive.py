@@ -11,7 +11,7 @@ This script reuses the retained five-model comprehensive analysis and adds:
   4. Publication-style model names/acronyms and ranked summary tables.
 
 Outputs:
-    20260909_Comprehensive.docx
+    20260920_models_1353.docx
     20260909_Comprehensive.xlsx
     20260909_Table1_2016.docx
     20260909_Publication_Tables.md
@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import csv
 from pathlib import Path
 
 import numpy as np
@@ -40,7 +41,7 @@ from sklearn.model_selection import StratifiedKFold, cross_val_predict, cross_va
 ROOT = Path(__file__).resolve().parent
 SOURCE_SCRIPT = ROOT / "20260904_Comprehensive_1018.py"
 SOURCE_XLSX = ROOT / "20260904_Comprehensive_1018.xlsx"
-OUTPUT_DOCX = ROOT / "20260909_Comprehensive.docx"
+OUTPUT_DOCX = ROOT / "20260920_models_1353.docx"
 OUTPUT_XLSX = ROOT / "20260909_Comprehensive.xlsx"
 OUTPUT_TABLE1 = ROOT / "20260909_Table1_2016.docx"
 OUTPUT_PUBLICATION_MD = ROOT / "20260909_Publication_Tables.md"
@@ -320,12 +321,64 @@ def bootstrap_youden_summary(y_true: np.ndarray, scores: np.ndarray,
     return out
 
 
-def analyse_binary_models(source, df: pd.DataFrame, features: list[str], scenario_name: str) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
+def analyse_binary_models(
+    source,
+    df: pd.DataFrame,
+    features: list[str],
+    scenario_name: str,
+    *,
+    observed_only: bool = False,
+) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
     scenario_col = SCENARIO_COLUMNS[scenario_name]
     model_df = df[df[scenario_col].notna()].copy()
+    if observed_only:
+        model_df = model_df[model_df["6MWT4"].notna()].copy()
     valid_features = source._filter_existing(features, model_df)
     X = model_df[valid_features]
     y = model_df[scenario_col].astype(int).to_numpy()
+    if len(model_df) == 0 or np.unique(y).size < 2:
+        fallback = {
+            "Binary_model": "LogisticRegression(class_weight='balanced', solver='liblinear')",
+            "Binary_model_short": "Logistic regression",
+            "Default_balanced_accuracy": float("nan"),
+            "Default_accuracy": float("nan"),
+            "Default_f1": float("nan"),
+            "OOF_probability_mean": float("nan"),
+            "Youden_threshold": float("nan"),
+            "Threshold_CI_lo": float("nan"),
+            "Threshold_CI_hi": float("nan"),
+            "Sensitivity": float("nan"),
+            "Sensitivity_CI_lo": float("nan"),
+            "Sensitivity_CI_hi": float("nan"),
+            "Specificity": float("nan"),
+            "Specificity_CI_lo": float("nan"),
+            "Specificity_CI_hi": float("nan"),
+            "Balanced_Accuracy": float("nan"),
+            "Balanced_Accuracy_CI_lo": float("nan"),
+            "Balanced_Accuracy_CI_hi": float("nan"),
+            "Accuracy": float("nan"),
+            "Accuracy_CI_lo": float("nan"),
+            "Accuracy_CI_hi": float("nan"),
+            "Youden_J": float("nan"),
+            "Youden_J_CI_lo": float("nan"),
+            "Youden_J_CI_hi": float("nan"),
+            "Bootstrap_valid_resamples": 0,
+            "N_positive": int(np.sum(y == 1)),
+            "N_negative": int(np.sum(y == 0)),
+            "Prevalence": float(np.mean(y)) if len(y) else float("nan"),
+            "N_Used": int(len(model_df)),
+        }
+        return fallback, pd.DataFrame([fallback]), pd.DataFrame(
+            columns=[
+                "Predictor",
+                "Scaled_Coefficient",
+                "Raw_Coefficient",
+                "Imputer_Median",
+                "Scaler_Mean",
+                "Scaler_Scale",
+                "Abs_Coefficient",
+            ]
+        )
     cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
     cv_splits = list(cv.split(X, y))
 
@@ -355,17 +408,42 @@ def analyse_binary_models(source, df: pd.DataFrame, features: list[str], scenari
         youden = bootstrap_youden_summary(y, oof_prob)
         fitted_pipe = clone(pipe)
         fitted_pipe.fit(X, y)
+        prep = fitted_pipe.named_steps["prep"]
+        num_pipe = prep.named_transformers_["num"]
+        imp = num_pipe.named_steps["imp"]
+        scaler = num_pipe.named_steps["sc"]
         fitted_model = fitted_pipe.named_steps["model"]
+        scaled_coefs = fitted_model.coef_[0]
+        scaled_intercept = float(fitted_model.intercept_[0])
+        scaler_scale = np.asarray(scaler.scale_, dtype=float)
+        scaler_mean = np.asarray(scaler.mean_, dtype=float)
+        raw_coefs = scaled_coefs / scaler_scale
+        raw_intercept = float(scaled_intercept - np.sum(scaled_coefs * scaler_mean / scaler_scale))
         coefficient_rows.append({
             "Predictor": "(Intercept)",
-            "Coefficient": float(fitted_model.intercept_[0]),
-            "Abs_Coefficient": abs(float(fitted_model.intercept_[0])),
+            "Scaled_Coefficient": scaled_intercept,
+            "Raw_Coefficient": raw_intercept,
+            "Imputer_Median": np.nan,
+            "Scaler_Mean": np.nan,
+            "Scaler_Scale": np.nan,
+            "Abs_Coefficient": abs(raw_intercept),
         })
-        for predictor, coef in zip(valid_features, fitted_model.coef_[0]):
+        for predictor, coef_scaled, coef_raw, imp_median, mean_v, scale_v in zip(
+            valid_features,
+            scaled_coefs,
+            raw_coefs,
+            imp.statistics_,
+            scaler_mean,
+            scaler_scale,
+        ):
             coefficient_rows.append({
                 "Predictor": predictor,
-                "Coefficient": float(coef),
-                "Abs_Coefficient": abs(float(coef)),
+                "Scaled_Coefficient": float(coef_scaled),
+                "Raw_Coefficient": float(coef_raw),
+                "Imputer_Median": float(imp_median),
+                "Scaler_Mean": float(mean_v),
+                "Scaler_Scale": float(scale_v),
+                "Abs_Coefficient": abs(float(coef_raw)),
             })
         rows.append({
             "Binary_model": name,
@@ -396,6 +474,7 @@ def analyse_binary_models(source, df: pd.DataFrame, features: list[str], scenari
             "N_positive": youden["n_positive"],
             "N_negative": youden["n_negative"],
             "Prevalence": youden["prevalence"],
+            "N_Used": int(len(model_df)),
         })
 
     leaderboard = pd.DataFrame(rows).sort_values(
@@ -511,27 +590,38 @@ def build_publication_tables(
         }
         model_slice = scenario_df[scenario_df["Model_label"] == model_row["Model_label"]]
         for scenario_name, prefix in [("Best", "Best"), ("Worst", "Worst")]:
-            scenario_match = model_slice[model_slice["Scenario"] == scenario_name].iloc[0]
+            hyp_rows = model_slice[
+                (model_slice["Scenario"] == scenario_name)
+                & (model_slice["Eval_scope"] == "Hypothetical")
+            ]
+            hyp_match = hyp_rows.iloc[0] if not hyp_rows.empty else None
+            hyp_acc = float(hyp_match["Accuracy"]) if hyp_match is not None else float("nan")
+            hyp_acc_lo = float(hyp_match["Accuracy_CI_lo"]) if hyp_match is not None else float("nan")
+            hyp_acc_hi = float(hyp_match["Accuracy_CI_hi"]) if hyp_match is not None else float("nan")
+            hyp_bal = float(hyp_match["Balanced_Accuracy"]) if hyp_match is not None else float("nan")
+            hyp_bal_lo = float(hyp_match["Balanced_Accuracy_CI_lo"]) if hyp_match is not None else float("nan")
+            hyp_bal_hi = float(hyp_match["Balanced_Accuracy_CI_hi"]) if hyp_match is not None else float("nan")
             row[f"{prefix} Acc [95% CI]"] = fmt_pct_ci(
-                float(scenario_match["Accuracy"]),
-                float(scenario_match["Accuracy_CI_lo"]),
-                float(scenario_match["Accuracy_CI_hi"]),
+                hyp_acc,
+                hyp_acc_lo,
+                hyp_acc_hi,
             )
             row[f"{prefix} BalAcc [95% CI]"] = fmt_pct_ci(
-                float(scenario_match["Balanced_Accuracy"]),
-                float(scenario_match["Balanced_Accuracy_CI_lo"]),
-                float(scenario_match["Balanced_Accuracy_CI_hi"]),
+                hyp_bal,
+                hyp_bal_lo,
+                hyp_bal_hi,
             )
-            row[f"{prefix} Se [95% CI]"] = fmt_pct_ci(
-                float(scenario_match["Sensitivity"]),
-                float(scenario_match["Sensitivity_CI_lo"]),
-                float(scenario_match["Sensitivity_CI_hi"]),
+            obs_rows = model_slice[
+                (model_slice["Scenario"] == scenario_name)
+                & (model_slice["Eval_scope"] == "Observed_6MWT4")
+            ]
+            obs_match = obs_rows.iloc[0] if not obs_rows.empty else None
+            row[f"Validated {prefix} BalAcc [95% CI]"] = fmt_pct_ci(
+                float(obs_match["Balanced_Accuracy"]) if obs_match is not None else float("nan"),
+                float(obs_match["Balanced_Accuracy_CI_lo"]) if obs_match is not None else float("nan"),
+                float(obs_match["Balanced_Accuracy_CI_hi"]) if obs_match is not None else float("nan"),
             )
-            row[f"{prefix} Sp [95% CI]"] = fmt_pct_ci(
-                float(scenario_match["Specificity"]),
-                float(scenario_match["Specificity_CI_lo"]),
-                float(scenario_match["Specificity_CI_hi"]),
-            )
+            row[f"Validated {prefix} n"] = int(obs_match["N_Used"]) if obs_match is not None else 0
         perf_rows.append(row)
     panel_a = pd.DataFrame(perf_rows)
 
@@ -620,45 +710,58 @@ def build_outputs(source) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.
         model_full_name = model_row["Model_full_name"]
         features = source.MODEL_SPECS[model_full_name]
         for scenario_name in SCENARIO_ORDER:
-            selected, leaderboard, coefficients = analyse_binary_models(source, predictions_df, features, scenario_name)
-            leaderboard = leaderboard.copy()
-            leaderboard.insert(0, "Scenario", scenario_name)
-            leaderboard.insert(0, "Model_label", model_row["Model_label"])
-            leaderboard.insert(0, "Acronym", model_row["Acronym"])
-            leaderboard_rows.append(leaderboard)
-            coefficients = coefficients.copy()
-            coefficients.insert(0, "Scenario", scenario_name)
-            coefficients.insert(0, "Model_label", model_row["Model_label"])
-            coefficients.insert(0, "Acronym", model_row["Acronym"])
-            coefficient_frames.append(coefficients)
+            for eval_scope, observed_only in [("Hypothetical", False), ("Observed_6MWT4", True)]:
+                selected, leaderboard, coefficients = analyse_binary_models(
+                    source,
+                    predictions_df,
+                    features,
+                    scenario_name,
+                    observed_only=observed_only,
+                )
+                leaderboard = leaderboard.copy()
+                leaderboard.insert(0, "Eval_scope", eval_scope)
+                leaderboard.insert(0, "Scenario", scenario_name)
+                leaderboard.insert(0, "Model_label", model_row["Model_label"])
+                leaderboard.insert(0, "Acronym", model_row["Acronym"])
+                leaderboard_rows.append(leaderboard)
+                coefficients = coefficients.copy()
+                coefficients.insert(0, "Eval_scope", eval_scope)
+                coefficients.insert(0, "Scenario", scenario_name)
+                coefficients.insert(0, "Model_label", model_row["Model_label"])
+                coefficients.insert(0, "Acronym", model_row["Acronym"])
+                coefficient_frames.append(coefficients)
 
-            scenario_rows.append({
-                "Overall_Rank": int(model_row["Overall_Rank"]),
-                "Model_label": model_row["Model_label"],
-                "Model_full_name": model_full_name,
-                "Acronym": model_row["Acronym"],
-                "Publication_Name": model_row["Publication_Name"],
-                "Model_Focus": model_row["Model_Focus"],
-                "Scenario": scenario_name,
-                "Scenario_note": SCENARIO_NOTES[scenario_name],
-                "Predictor_count": int(model_row["Input_vars"]),
-                "Predictor_categories_summary": model_row["Predictor_categories_summary"],
-                "LASSO_CV_R2": float(model_row["CV_R2"]),
-                "LASSO_CV_MAE": float(model_row["CV_MAE"]),
-                "IPCW_Weighted_OOF_R2": float(model_row["Weighted_OOF_R2"]),
-                "IPCW_Weighted_OOF_MAE": float(model_row["Weighted_OOF_MAE"]),
-                "Source_binary_OOF_bal_acc": float(
-                    ipcw_summary.loc[
-                        (ipcw_summary["Model"] == model_row["Model_label"])
-                        & (ipcw_summary["Scenario"] == scenario_name),
-                        "Binary_OOF_Bal_Acc",
-                    ].iloc[0]
-                ),
-                **selected,
-            })
+                source_bal_acc = np.nan
+                if eval_scope == "Hypothetical":
+                    source_bal_acc = float(
+                        ipcw_summary.loc[
+                            (ipcw_summary["Model"] == model_row["Model_label"])
+                            & (ipcw_summary["Scenario"] == scenario_name),
+                            "Binary_OOF_Bal_Acc",
+                        ].iloc[0]
+                    )
+                scenario_rows.append({
+                    "Overall_Rank": int(model_row["Overall_Rank"]),
+                    "Model_label": model_row["Model_label"],
+                    "Model_full_name": model_full_name,
+                    "Acronym": model_row["Acronym"],
+                    "Publication_Name": model_row["Publication_Name"],
+                    "Model_Focus": model_row["Model_Focus"],
+                    "Scenario": scenario_name,
+                    "Eval_scope": eval_scope,
+                    "Scenario_note": SCENARIO_NOTES[scenario_name],
+                    "Predictor_count": int(model_row["Input_vars"]),
+                    "Predictor_categories_summary": model_row["Predictor_categories_summary"],
+                    "LASSO_CV_R2": float(model_row["CV_R2"]),
+                    "LASSO_CV_MAE": float(model_row["CV_MAE"]),
+                    "IPCW_Weighted_OOF_R2": float(model_row["Weighted_OOF_R2"]),
+                    "IPCW_Weighted_OOF_MAE": float(model_row["Weighted_OOF_MAE"]),
+                    "Source_binary_OOF_bal_acc": source_bal_acc,
+                    **selected,
+                })
 
     scenario_df = pd.DataFrame(scenario_rows).sort_values(
-        ["Scenario", "Overall_Rank"], ascending=[True, True]
+        ["Eval_scope", "Scenario", "Overall_Rank"], ascending=[True, True, True]
     ).reset_index(drop=True)
     leaderboard_df = pd.concat(leaderboard_rows, ignore_index=True)
     coefficients_df = pd.concat(coefficient_frames, ignore_index=True)
@@ -714,9 +817,9 @@ def write_excel(ranked_models: pd.DataFrame, scenario_df: pd.DataFrame,
 
 
 def write_publication_files(panel_a_df: pd.DataFrame, panel_b_df: pd.DataFrame, table2_df: pd.DataFrame) -> None:
-    panel_a_df.to_csv(OUTPUT_PANEL_A_CSV, index=False)
-    panel_b_df.to_csv(OUTPUT_PANEL_B_CSV, index=False)
-    table2_df.to_csv(OUTPUT_TABLE2_CSV, index=False)
+    panel_a_df.to_csv(OUTPUT_PANEL_A_CSV, index=False, quoting=csv.QUOTE_ALL)
+    panel_b_df.to_csv(OUTPUT_PANEL_B_CSV, index=False, quoting=csv.QUOTE_ALL)
+    table2_df.to_csv(OUTPUT_TABLE2_CSV, index=False, quoting=csv.QUOTE_ALL)
 
     markdown_parts = [
         "## Table 1. Retained 20260909 models: binary performance and stable Part 1 predictors",
@@ -769,6 +872,7 @@ def write_table1_docx(panel_a_df: pd.DataFrame, panel_b_df: pd.DataFrame) -> Non
 
     subtitle = doc.add_paragraph(
         "Panel A summarizes Part 2 IPCW binary classification performance across the retained 20260909 models. "
+        "Best/Worst columns are hypothetical bounds under assumed labels, while 'Validated' columns are restricted to observed 6MWT4 outcomes only. "
         "Panel B shows Part 1 stable bootstrap LASSO coefficients carried forward from the retained 20260904 models, "
         "using the same 20260909 ranks, model labels, publication names, and acronyms."
     )
@@ -826,6 +930,7 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
         "Part 1 stable predictor summaries were re-derived from the retained 20260904 bootstrap LASSO models so that "
         "all tables inherit the 20260909 ranks, model labels, publication names, and acronyms. "
         "Part 2 logistic-regression classifiers were re-evaluated using out-of-fold predicted probabilities. "
+        "Best/Worst assumptions are reported as hypothetical bounds, and validated discrimination is reported separately after excluding rows with missing 6MWT4. "
         "For each retained model and each scenario (Best and Worst), a Youden-optimal cutpoint was then derived from "
         "the out-of-fold ROC curve, and bootstrap percentile confidence intervals around the cutpoint and its "
         "operating characteristics were estimated from 2,000 resamples."
@@ -867,21 +972,23 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
 
     for scenario_name in SCENARIO_ORDER:
         scenario_rows = [[
-            "Rank", "Acronym", "Cutpoint [95% CI]",
+            "Rank", "Acronym", "Scope", "Cutpoint [95% CI]",
             "Sensitivity [95% CI]", "Specificity [95% CI]", "Balanced accuracy [95% CI]",
-            "Accuracy [95% CI]", "Bootstrap n",
+            "Accuracy [95% CI]", "Bootstrap n", "n used",
         ]]
         scenario_slice = scenario_df[scenario_df["Scenario"] == scenario_name]
         for _, row in scenario_slice.iterrows():
             scenario_rows.append([
                 str(int(row["Overall_Rank"])),
                 row["Acronym"],
+                row["Eval_scope"],
                 fmt_ci(row["Youden_threshold"], row["Threshold_CI_lo"], row["Threshold_CI_hi"], 3),
                 fmt_ci(row["Sensitivity"], row["Sensitivity_CI_lo"], row["Sensitivity_CI_hi"], 3),
                 fmt_ci(row["Specificity"], row["Specificity_CI_lo"], row["Specificity_CI_hi"], 3),
                 fmt_ci(row["Balanced_Accuracy"], row["Balanced_Accuracy_CI_lo"], row["Balanced_Accuracy_CI_hi"], 3),
                 fmt_ci(row["Accuracy"], row["Accuracy_CI_lo"], row["Accuracy_CI_hi"], 3),
                 str(int(row["Bootstrap_valid_resamples"])),
+                str(int(row["N_Used"])),
             ])
         add_styled_table(
             doc,
@@ -941,7 +1048,10 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
             landscape=True,
         )
 
-        this_model = scenario_df[scenario_df["Model_label"] == row["Model_label"]]
+        this_model = scenario_df[
+            (scenario_df["Model_label"] == row["Model_label"])
+            & (scenario_df["Eval_scope"] == "Observed_6MWT4")
+        ]
         op_rows = [[
             "Scenario", "Cutpoint [95% CI]", "Se [95% CI]",
             "Sp [95% CI]", "BalAcc [95% CI]", "Acc [95% CI]",
@@ -957,10 +1067,13 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
             ])
         add_styled_table(doc, op_rows, font_size=8)
 
-        model_coef = coefficients_df[coefficients_df["Model_label"] == row["Model_label"]].copy()
+        model_coef = coefficients_df[
+            (coefficients_df["Model_label"] == row["Model_label"])
+            & (coefficients_df["Eval_scope"] == "Hypothetical")
+        ].copy()
         coef_pivot = (
             model_coef
-            .pivot_table(index="Predictor", columns="Scenario", values="Coefficient", aggfunc="first")
+            .pivot_table(index="Predictor", columns="Scenario", values="Raw_Coefficient", aggfunc="first")
             .reset_index()
         )
         coef_abs = (
@@ -969,18 +1082,50 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
         )
         coef_pivot = coef_pivot.merge(coef_abs, on="Predictor", how="left")
         coef_pivot = coef_pivot.sort_values("MaxAbs", ascending=False)
-        coef_rows = [["Predictor", "Best coefficient", "Worst coefficient"]]
+        coef_rows = [["Predictor", "Best raw coefficient", "Worst raw coefficient"]]
         for _, coef_row in coef_pivot.iterrows():
             coef_rows.append([
                 coef_row["Predictor"],
                 fmt_num(float(coef_row["Best"]), 4) if "Best" in coef_pivot.columns and math.isfinite(float(coef_row["Best"])) else "N/A",
                 fmt_num(float(coef_row["Worst"]), 4) if "Worst" in coef_pivot.columns and math.isfinite(float(coef_row["Worst"])) else "N/A",
             ])
-        add_styled_table(doc, coef_rows, title="Logistic regression coefficients (Best vs Worst)", font_size=8)
+        add_styled_table(doc, coef_rows, title="Logistic regression raw-scale coefficients (Best vs Worst hypothetical labels)", font_size=8)
+
+        eq_coef = coefficients_df[
+            (coefficients_df["Model_label"] == row["Model_label"])
+            & (coefficients_df["Eval_scope"] == "Hypothetical")
+        ].copy()
+        eq_rows = [[
+            "Scenario", "Predictor", "Raw coef", "Scaled coef", "Imputer median", "Scaler mean", "Scaler scale",
+        ]]
+        for _, eq_row in eq_coef.iterrows():
+            eq_rows.append([
+                eq_row["Scenario"],
+                eq_row["Predictor"],
+                fmt_num(float(eq_row["Raw_Coefficient"]), 6),
+                fmt_num(float(eq_row["Scaled_Coefficient"]), 6),
+                "—" if pd.isna(eq_row["Imputer_Median"]) else fmt_num(float(eq_row["Imputer_Median"]), 4),
+                "—" if pd.isna(eq_row["Scaler_Mean"]) else fmt_num(float(eq_row["Scaler_Mean"]), 4),
+                "—" if pd.isna(eq_row["Scaler_Scale"]) else fmt_num(float(eq_row["Scaler_Scale"]), 4),
+            ])
+        add_styled_table(
+            doc,
+            eq_rows,
+            title="Usable logistic prediction equation components (hypothetical Best/Worst labels)",
+            font_size=7,
+            landscape=True,
+        )
+        rule = doc.add_paragraph(
+            "Prediction rule: logit(p_walk)=intercept+Σ(raw coefficient × imputed raw predictor). "
+            "Probability is converted with p_walk=1/(1+exp(-logit)). "
+            "In the Part 2 workflow, non-completers predicted as non-walkers are assigned predicted 6MWT4=0; walk-predicted non-completers receive the weighted Ridge estimate clipped at 0."
+        )
+        for run in rule.runs:
+            run.font.size = Pt(8)
 
     reproducibility = doc.add_paragraph(
         "Reproducibility: run `python 20260909_Comprehensive.py` from the repository root clone to regenerate "
-        "20260909_Comprehensive.docx, 20260909_Comprehensive.xlsx, 20260909_Table1_2016.docx, "
+        "20260920_models_1353.docx, 20260909_Comprehensive.xlsx, 20260909_Table1_2016.docx, "
         "20260909_Publication_Tables.md, and 20260909_Publication_Tables.tex."
     )
     for run in reproducibility.runs:
