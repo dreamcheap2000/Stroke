@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import csv
 from pathlib import Path
 
 import numpy as np
@@ -335,6 +336,49 @@ def analyse_binary_models(
     valid_features = source._filter_existing(features, model_df)
     X = model_df[valid_features]
     y = model_df[scenario_col].astype(int).to_numpy()
+    if len(model_df) == 0 or np.unique(y).size < 2:
+        fallback = {
+            "Binary_model": "LogisticRegression(class_weight='balanced', solver='liblinear')",
+            "Binary_model_short": "Logistic regression",
+            "Default_balanced_accuracy": float("nan"),
+            "Default_accuracy": float("nan"),
+            "Default_f1": float("nan"),
+            "OOF_probability_mean": float("nan"),
+            "Youden_threshold": float("nan"),
+            "Threshold_CI_lo": float("nan"),
+            "Threshold_CI_hi": float("nan"),
+            "Sensitivity": float("nan"),
+            "Sensitivity_CI_lo": float("nan"),
+            "Sensitivity_CI_hi": float("nan"),
+            "Specificity": float("nan"),
+            "Specificity_CI_lo": float("nan"),
+            "Specificity_CI_hi": float("nan"),
+            "Balanced_Accuracy": float("nan"),
+            "Balanced_Accuracy_CI_lo": float("nan"),
+            "Balanced_Accuracy_CI_hi": float("nan"),
+            "Accuracy": float("nan"),
+            "Accuracy_CI_lo": float("nan"),
+            "Accuracy_CI_hi": float("nan"),
+            "Youden_J": float("nan"),
+            "Youden_J_CI_lo": float("nan"),
+            "Youden_J_CI_hi": float("nan"),
+            "Bootstrap_valid_resamples": 0,
+            "N_positive": int(np.sum(y == 1)),
+            "N_negative": int(np.sum(y == 0)),
+            "Prevalence": float(np.mean(y)) if len(y) else float("nan"),
+            "N_Used": int(len(model_df)),
+        }
+        return fallback, pd.DataFrame([fallback]), pd.DataFrame(
+            columns=[
+                "Predictor",
+                "Scaled_Coefficient",
+                "Raw_Coefficient",
+                "Imputer_Median",
+                "Scaler_Mean",
+                "Scaler_Scale",
+                "Abs_Coefficient",
+            ]
+        )
     cv = StratifiedKFold(n_splits=CV_FOLDS, shuffle=True, random_state=RANDOM_STATE)
     cv_splits = list(cv.split(X, y))
 
@@ -546,30 +590,38 @@ def build_publication_tables(
         }
         model_slice = scenario_df[scenario_df["Model_label"] == model_row["Model_label"]]
         for scenario_name, prefix in [("Best", "Best"), ("Worst", "Worst")]:
-            hyp_match = model_slice[
+            hyp_rows = model_slice[
                 (model_slice["Scenario"] == scenario_name)
                 & (model_slice["Eval_scope"] == "Hypothetical")
-            ].iloc[0]
+            ]
+            hyp_match = hyp_rows.iloc[0] if not hyp_rows.empty else None
+            hyp_acc = float(hyp_match["Accuracy"]) if hyp_match is not None else float("nan")
+            hyp_acc_lo = float(hyp_match["Accuracy_CI_lo"]) if hyp_match is not None else float("nan")
+            hyp_acc_hi = float(hyp_match["Accuracy_CI_hi"]) if hyp_match is not None else float("nan")
+            hyp_bal = float(hyp_match["Balanced_Accuracy"]) if hyp_match is not None else float("nan")
+            hyp_bal_lo = float(hyp_match["Balanced_Accuracy_CI_lo"]) if hyp_match is not None else float("nan")
+            hyp_bal_hi = float(hyp_match["Balanced_Accuracy_CI_hi"]) if hyp_match is not None else float("nan")
             row[f"{prefix} Acc [95% CI]"] = fmt_pct_ci(
-                float(hyp_match["Accuracy"]),
-                float(hyp_match["Accuracy_CI_lo"]),
-                float(hyp_match["Accuracy_CI_hi"]),
+                hyp_acc,
+                hyp_acc_lo,
+                hyp_acc_hi,
             )
             row[f"{prefix} BalAcc [95% CI]"] = fmt_pct_ci(
-                float(hyp_match["Balanced_Accuracy"]),
-                float(hyp_match["Balanced_Accuracy_CI_lo"]),
-                float(hyp_match["Balanced_Accuracy_CI_hi"]),
+                hyp_bal,
+                hyp_bal_lo,
+                hyp_bal_hi,
             )
-            obs_match = model_slice[
+            obs_rows = model_slice[
                 (model_slice["Scenario"] == scenario_name)
                 & (model_slice["Eval_scope"] == "Observed_6MWT4")
-            ].iloc[0]
+            ]
+            obs_match = obs_rows.iloc[0] if not obs_rows.empty else None
             row[f"Validated {prefix} BalAcc [95% CI]"] = fmt_pct_ci(
-                float(obs_match["Balanced_Accuracy"]),
-                float(obs_match["Balanced_Accuracy_CI_lo"]),
-                float(obs_match["Balanced_Accuracy_CI_hi"]),
+                float(obs_match["Balanced_Accuracy"]) if obs_match is not None else float("nan"),
+                float(obs_match["Balanced_Accuracy_CI_lo"]) if obs_match is not None else float("nan"),
+                float(obs_match["Balanced_Accuracy_CI_hi"]) if obs_match is not None else float("nan"),
             )
-            row[f"Validated {prefix} n"] = int(obs_match["N_Used"])
+            row[f"Validated {prefix} n"] = int(obs_match["N_Used"]) if obs_match is not None else 0
         perf_rows.append(row)
     panel_a = pd.DataFrame(perf_rows)
 
@@ -765,9 +817,9 @@ def write_excel(ranked_models: pd.DataFrame, scenario_df: pd.DataFrame,
 
 
 def write_publication_files(panel_a_df: pd.DataFrame, panel_b_df: pd.DataFrame, table2_df: pd.DataFrame) -> None:
-    panel_a_df.to_csv(OUTPUT_PANEL_A_CSV, index=False)
-    panel_b_df.to_csv(OUTPUT_PANEL_B_CSV, index=False)
-    table2_df.to_csv(OUTPUT_TABLE2_CSV, index=False)
+    panel_a_df.to_csv(OUTPUT_PANEL_A_CSV, index=False, quoting=csv.QUOTE_ALL)
+    panel_b_df.to_csv(OUTPUT_PANEL_B_CSV, index=False, quoting=csv.QUOTE_ALL)
+    table2_df.to_csv(OUTPUT_TABLE2_CSV, index=False, quoting=csv.QUOTE_ALL)
 
     markdown_parts = [
         "## Table 1. Retained 20260909 models: binary performance and stable Part 1 predictors",
@@ -1041,7 +1093,7 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
 
         eq_coef = coefficients_df[
             (coefficients_df["Model_label"] == row["Model_label"])
-            & (coefficients_df["Eval_scope"] == "Observed_6MWT4")
+            & (coefficients_df["Eval_scope"] == "Hypothetical")
         ].copy()
         eq_rows = [[
             "Scenario", "Predictor", "Raw coef", "Scaled coef", "Imputer median", "Scaler mean", "Scaler scale",
@@ -1059,7 +1111,7 @@ def write_comprehensive_docx(ranked_models: pd.DataFrame, scenario_df: pd.DataFr
         add_styled_table(
             doc,
             eq_rows,
-            title="Usable logistic prediction equation components (validated set; missing 6MWT4 excluded)",
+            title="Usable logistic prediction equation components (hypothetical Best/Worst labels)",
             font_size=7,
             landscape=True,
         )
