@@ -22,11 +22,13 @@ PAC_ORDER = ["Completed PAC program", "Did not complete PAC program"]
 FIRST_TP_ORDER = ["Never", "T1", "T2", "T3", "T4"]
 
 
-def ci95_half_width(values: pd.Series) -> float:
+def ci95_interval(values: pd.Series) -> str:
     n = len(values)
     if n < 2:
-        return np.nan
-    return float(1.96 * values.std(ddof=1) / np.sqrt(n))
+        return "(nan-nan)"
+    mean = float(values.mean())
+    half_width = float(1.96 * values.std(ddof=1) / np.sqrt(n))
+    return f"({mean - half_width:.1f}-{mean + half_width:.1f})"
 
 
 def iqr_range(values: pd.Series) -> str:
@@ -44,7 +46,7 @@ def summarize_series(values: pd.Series) -> dict[str, object]:
             "mean": np.nan,
             "median": np.nan,
             "iqr_range": "(nan-nan)",
-            "ci_95": np.nan,
+            "ci_95": "(nan-nan)",
             "valid_count": 0,
         }
 
@@ -52,7 +54,7 @@ def summarize_series(values: pd.Series) -> dict[str, object]:
         "mean": float(clean.mean()),
         "median": float(clean.median()),
         "iqr_range": iqr_range(clean),
-        "ci_95": ci95_half_width(clean),
+        "ci_95": ci95_interval(clean),
         "valid_count": int(clean.shape[0]),
     }
 
